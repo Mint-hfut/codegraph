@@ -38,6 +38,12 @@ export const NODE_KINDS = [
   'export',
   'route',
   'component',
+  // Documentation / project-artifact nodes (README, skills, agent memory,
+  // Dockerfile, CI workflows, package manifests). A `document` is the
+  // file-level content node; `section`s form its internal tree (markdown
+  // headings, Dockerfile stages, compose services, CI jobs, npm scripts).
+  'document',
+  'section',
 ] as const;
 
 export type NodeKind = (typeof NODE_KINDS)[number];
@@ -93,6 +99,12 @@ export const LANGUAGES = [
   'twig',
   'xml',
   'properties',
+  // Project artifacts handled by the artifact extractors (no tree-sitter
+  // grammar): markdown docs/skills/memory, Dockerfile/Containerfile, and
+  // JSON manifests (package.json).
+  'markdown',
+  'dockerfile',
+  'json',
   'unknown',
 ] as const;
 

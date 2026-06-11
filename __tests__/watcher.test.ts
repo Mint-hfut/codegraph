@@ -160,8 +160,9 @@ describe('FileWatcher', () => {
       await watcher.waitUntilReady();
 
       // A non-source-file event — FileWatcher's `isSourceFile` gate must drop
-      // it before scheduling sync.
-      __emitWatchEventForTests(testDir, 'src/readme.md');
+      // it before scheduling sync. (.md is indexed as a document artifact now,
+      // so use a genuinely unindexed extension.)
+      __emitWatchEventForTests(testDir, 'src/notes.txt');
 
       // Wait a bit longer than debounce — sync should NOT trigger.
       await new Promise((r) => setTimeout(r, 400));

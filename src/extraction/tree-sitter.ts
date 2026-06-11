@@ -25,6 +25,7 @@ import { SvelteExtractor } from './svelte-extractor';
 import { DfmExtractor } from './dfm-extractor';
 import { VueExtractor } from './vue-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
+import { findArtifactExtractor } from './artifacts/registry';
 import {
   getAllFrameworkResolvers,
   getApplicableFrameworks,
@@ -4358,8 +4359,22 @@ export function extractFromSource(
 
   let result: ExtractionResult;
 
-  // Use custom extractor for Svelte
-  if (detectedLanguage === 'svelte') {
+  // Artifact extractors (markdown docs/skills/memory, Dockerfile, compose,
+  // CI workflows, package.json) own their paths entirely — checked before
+  // any language dispatch. They emit document/section nodes plus
+  // high-confidence doc→code mentions (see artifacts/registry.ts).
+  const artifact = findArtifactExtractor(filePath);
+  if (artifact) {
+    result = artifact.extract(filePath, source);
+  } else if (
+    detectedLanguage === 'markdown' ||
+    detectedLanguage === 'dockerfile' ||
+    detectedLanguage === 'json'
+  ) {
+    // Artifact-family language without a registry match (defensive against
+    // predicate drift) — track at the file level only, like yaml/twig.
+    result = { nodes: [], edges: [], unresolvedReferences: [], errors: [], durationMs: 0 };
+  } else if (detectedLanguage === 'svelte') {
     const extractor = new SvelteExtractor(filePath, source);
     result = extractor.extract();
   } else if (detectedLanguage === 'vue') {

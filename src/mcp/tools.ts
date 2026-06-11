@@ -389,7 +389,7 @@ export const tools: ToolDefinition[] = [
         kind: {
           type: 'string',
           description: 'Filter by node kind',
-          enum: ['function', 'method', 'class', 'interface', 'type', 'variable', 'route', 'component'],
+          enum: ['function', 'method', 'class', 'interface', 'type', 'variable', 'route', 'component', 'document', 'section'],
         },
         limit: {
           type: 'number',

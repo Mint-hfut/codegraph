@@ -682,9 +682,10 @@ function processDate(input: string): string {
       const frameworks = cg.getDetectedFrameworks();
       expect(frameworks).toContain('react');
 
-      // Get stats to verify indexing worked
+      // Get stats to verify indexing worked: the two TS files plus
+      // package.json (indexed as a package-manifest artifact).
       const stats = cg.getStats();
-      expect(stats.fileCount).toBe(2);
+      expect(stats.fileCount).toBe(3);
       expect(stats.nodeCount).toBeGreaterThan(0);
     });
 

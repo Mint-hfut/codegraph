@@ -9,8 +9,9 @@
 import * as path from 'path';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import { Language } from '../types';
+import { isDockerfilePath, isPackageManifestPath, isExtraArtifactSourceFile } from './artifacts/detect';
 
-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
+export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'markdown' | 'dockerfile' | 'json' | 'unknown'>;
 
 /**
  * WASM filename map — maps each language to its .wasm grammar file
@@ -112,6 +113,16 @@ export const EXTENSION_MAP: Record<string, Language> = {
   // shape as the `.yml` variants — the YAML/properties extractor emits one node
   // per leaf key, and the Spring resolver links `@Value("${k}")` references.
   '.properties': 'properties',
+  // Markdown family — README/docs, agent skills (SKILL.md) and memory
+  // (CLAUDE.md/AGENTS.md), Cursor rules (.mdc). Handled by the markdown
+  // artifact extractor (document/section nodes, doc→code mentions).
+  '.md': 'markdown',
+  '.markdown': 'markdown',
+  '.mdx': 'markdown',
+  '.mdc': 'markdown',
+  // Suffixed Dockerfiles (`app.dockerfile`); the bare `Dockerfile` is
+  // extensionless and detected by isDockerfilePath instead.
+  '.dockerfile': 'dockerfile',
 };
 
 /**
@@ -122,6 +133,7 @@ export const EXTENSION_MAP: Record<string, Language> = {
 export function isSourceFile(filePath: string): boolean {
   if (isPlayRoutesFile(filePath)) return true; // Play `conf/routes` is extensionless
   if (isShopifyLiquidJson(filePath)) return true; // Shopify OS 2.0 JSON templates / section groups
+  if (isExtraArtifactSourceFile(filePath)) return true; // Dockerfile (extensionless), package.json
   const dot = filePath.lastIndexOf('.');
   if (dot < 0) return false;
   return filePath.slice(dot).toLowerCase() in EXTENSION_MAP;
@@ -261,6 +273,9 @@ export function detectLanguage(filePath: string, source?: string): Language {
   // Play `conf/routes` has no grammar — route through the no-symbol path; the
   // Play framework resolver extracts route nodes from it.
   if (isPlayRoutesFile(filePath)) return 'yaml';
+  // Extensionless / JSON artifacts handled by the artifact extractors.
+  if (isDockerfilePath(filePath)) return 'dockerfile';
+  if (isPackageManifestPath(filePath)) return 'json';
   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
   // Shopify OS 2.0 JSON templates / section groups → the Liquid extractor (it
   // links each section `"type"` to its `sections/<type>.liquid`).
@@ -306,6 +321,9 @@ export function isLanguageSupported(language: Language): boolean {
   if (language === 'twig') return true; // file-level tracking only
   if (language === 'xml') return true; // MyBatis mapper extractor
   if (language === 'properties') return true; // Spring config keys
+  if (language === 'markdown') return true; // markdown artifact extractor
+  if (language === 'dockerfile') return true; // Dockerfile artifact extractor
+  if (language === 'json') return true; // package.json artifact extractor
   if (language === 'unknown') return false;
   return language in WASM_GRAMMAR_FILES;
 }
@@ -317,6 +335,7 @@ export function isGrammarLoaded(language: Language): boolean {
   if (language === 'svelte' || language === 'vue' || language === 'liquid' || language === 'razor') return true;
   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
+  if (language === 'markdown' || language === 'dockerfile' || language === 'json') return true; // artifact extractors
   return languageCache.has(language);
 }
 
@@ -337,7 +356,7 @@ export function isFileLevelOnlyLanguage(language: Language): boolean {
  * Get all supported languages (those with grammar definitions).
  */
 export function getSupportedLanguages(): Language[] {
-  return [...(Object.keys(WASM_GRAMMAR_FILES) as GrammarLanguage[]), 'svelte', 'vue', 'liquid'];
+  return [...(Object.keys(WASM_GRAMMAR_FILES) as GrammarLanguage[]), 'svelte', 'vue', 'liquid', 'markdown', 'dockerfile', 'json'];
 }
 
 /**
@@ -413,6 +432,9 @@ export function getLanguageDisplayName(language: Language): string {
     twig: 'Twig',
     xml: 'XML',
     properties: 'Java properties',
+    markdown: 'Markdown',
+    dockerfile: 'Dockerfile',
+    json: 'JSON',
     unknown: 'Unknown',
   };
   return names[language] || language;

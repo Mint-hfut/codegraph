@@ -16,7 +16,7 @@ import {
   FrameworkResolver,
   ImportMapping,
 } from './types';
-import { matchReference, matchDottedCallChain, matchScopedCallChain, sameLanguageFamily, crossesKnownFamily } from './name-matcher';
+import { matchReference, matchByFilePath, matchDottedCallChain, matchScopedCallChain, sameLanguageFamily, crossesKnownFamily } from './name-matcher';
 import { resolveViaImport, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef } from './import-resolver';
 import { detectFrameworks } from './frameworks';
 import { synthesizeCallbackEdges } from './callback-synthesizer';
@@ -26,6 +26,17 @@ import { loadWorkspacePackages, type WorkspacePackages } from './workspace-packa
 import { logDebug } from '../errors';
 import type { ReExport } from './types';
 import { LRUCache } from './lru-cache';
+
+/**
+ * Node kinds a documentation mention may link to. Files are handled by the
+ * path branch; imports/exports/parameters and other documents' sections are
+ * never useful link targets for prose.
+ */
+const DOC_MENTION_TARGET_KINDS = new Set<Node['kind']>([
+  'module', 'class', 'struct', 'interface', 'trait', 'protocol',
+  'function', 'method', 'property', 'field', 'variable', 'constant',
+  'enum', 'enum_member', 'type_alias', 'namespace', 'route', 'component',
+]);
 
 /** Node kinds that can declare supertypes (extends/implements). */
 const SUPERTYPE_BEARING_KINDS = new Set<Node['kind']>([
@@ -650,6 +661,16 @@ export class ReferenceResolver {
    * Resolve a single reference
    */
   resolveOne(ref: UnresolvedRef): ResolvedRef | null {
+    // Documentation-sourced mentions (README/skills/agent memory/Dockerfile/
+    // CI artifacts) resolve through a dedicated STRICT path: a wrong doc→code
+    // edge misleads agents reading the graph, so anything ambiguous stays
+    // unlinked (wrong edges are worse than none). Identified by the emitting
+    // node's kind prefix — only artifact extractors create document/section
+    // nodes.
+    if (ref.fromNodeId.startsWith('document:') || ref.fromNodeId.startsWith('section:')) {
+      return this.resolveDocMention(ref);
+    }
+
     // Skip built-in/external references
     if (this.isBuiltInOrExternal(ref)) {
       return null;
@@ -743,6 +764,64 @@ export class ReferenceResolver {
     return candidates.reduce((best, curr) =>
       curr.confidence > best.confidence ? curr : best
     );
+  }
+
+  /**
+   * Strict resolution for documentation mentions (refs emitted by artifact
+   * extractors — README/skills/memory/Dockerfile/CI). Two shapes only:
+   *
+   *  - Path-like (`src/sync/watcher.ts`, `package.json`) → file node via
+   *    matchByFilePath, but only at exact/suffix confidence — the
+   *    unique-basename fallback (0.7) is rejected because prose paths are
+   *    often stale or abbreviated.
+   *  - Symbol-like (`FileWatcher`, `CodeGraph.indexAll`) → linked only when
+   *    the name identifies exactly ONE definition in the whole graph
+   *    (overloads of one qualified name count as one). Ambiguous names stay
+   *    unlinked: a wrong doc→code edge is worse than none.
+   */
+  private resolveDocMention(ref: UnresolvedRef): ResolvedRef | null {
+    const looksLikePath =
+      ref.referenceName.includes('/') || /\.[A-Za-z][A-Za-z0-9]{0,7}$/.test(ref.referenceName);
+    if (looksLikePath) {
+      const match = matchByFilePath(ref, this.context);
+      if (match && match.confidence >= 0.85) {
+        return { ...match, resolvedBy: 'doc-mention' };
+      }
+      return null;
+    }
+
+    let name = ref.referenceName;
+    let receiver: string | null = null;
+    const dot = name.lastIndexOf('.');
+    if (dot > 0) {
+      receiver = name.slice(0, dot);
+      name = name.slice(dot + 1);
+    }
+
+    let candidates = this.context
+      .getNodesByName(name)
+      .filter((n) => DOC_MENTION_TARGET_KINDS.has(n.kind));
+    if (receiver) {
+      candidates = candidates.filter(
+        (n) =>
+          n.qualifiedName.includes(`${receiver}.`) || n.qualifiedName.includes(`${receiver}::`)
+      );
+    }
+    if (candidates.length === 0) return null;
+
+    // Overloads / re-declarations of one symbol count as a single target —
+    // but qualifiedName alone is NOT unique across files (it's built from the
+    // semantic hierarchy only), so key by file + qualified name. Same name in
+    // two files = ambiguous = no edge.
+    const distinct = new Set(candidates.map((n) => `${n.filePath}\0${n.qualifiedName}`));
+    if (distinct.size !== 1) return null;
+
+    return {
+      original: ref,
+      targetNodeId: candidates[0]!.id,
+      confidence: 0.85,
+      resolvedBy: 'doc-mention',
+    };
   }
 
   /**
