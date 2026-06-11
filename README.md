@@ -35,29 +35,51 @@
 
 </div>
 
+> [!NOTE]
+> 本仓库是 [colbymchenry/codegraph](https://github.com/colbymchenry/codegraph) 的**增强分支**：
+> 在代码知识图谱之上，把 **README/文档、Agent 技能（SKILL.md）、Agent 记忆（CLAUDE.md/AGENTS.md）、
+> Dockerfile/Compose、CI workflow、package.json** 也纳入同一张图谱，并与代码高置信互联。
+> 详见 [与上游 CodeGraph 的区别](#与上游-codegraph-的区别) 和
+> [制品知识图谱更新说明](docs/artifact-knowledge-graph.md)。
+> 本分支未发布到 npm，请按下文**从源码安装**。
+
+## 与上游 CodeGraph 的区别
+
+| | 上游 CodeGraph | 本分支 |
+|---|---|---|
+| **图谱覆盖范围** | 仅代码（tree-sitter 解析的源码符号） | 代码 **+ 项目知识制品**：markdown 文档、Agent 技能/记忆、Dockerfile/Containerfile、docker-compose、GitHub Actions workflow、package.json |
+| **节点类型** | 22 种代码 NodeKind | 新增 `document`（语义类型：readme / skill / memory / doc / dockerfile / compose / workflow / package-manifest）与 `section`（标题层级 / 构建 stage / service / CI job / npm script） |
+| **文档 ↔ 代码连边** | 无 | 高置信 `references` 边：文档中的显式文件路径、全图唯一的符号名才连边，**歧义一律不连**（错边比没边更糟），边带 `resolvedBy: 'doc-mention'` 可审计 |
+| **Agent 能回答的问题** | "X 是怎么工作的"等代码结构/流程问题 | 额外支持 "README 里关于部署是怎么说的" "哪个 skill 负责发版" "CLAUDE.md 对测试有什么要求" "改这个函数会影响哪些文档/CI" |
+| **实时更新** | 代码文件改动 ~1s 入图 | 同一管线覆盖制品文件——改完 `CLAUDE.md`/`SKILL.md` 约 1 秒后图谱即最新 |
+| **安装方式** | npm / 一键安装脚本（预编译 bundle） | 从源码构建（见下文），其余 `codegraph install` / `init` 用法与上游一致 |
+| **索引版本** | EXTRACTION_VERSION 14 | 15（存量索引会提示重建，`codegraph index -f` 即可） |
+
+架构、原理与扩展方法详见 [docs/artifact-knowledge-graph.md](docs/artifact-knowledge-graph.md)。
+
 ## Get Started
 
-### 1. Install the CLI
+### 1. 从源码安装 CLI
 
-**No Node.js required** — one command grabs the right build for your OS:
-
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex
-```
-
-Already have Node? Use npm instead (works on any version):
+本分支未发布到 npm，需要从源码构建（要求 **Node.js ≥ 18 且 < 25**）：
 
 ```bash
-npm i -g @colbymchenry/codegraph
+git clone https://github.com/Mint-hfut/codegraph.git
+cd codegraph
+npm ci            # 安装依赖
+npm run build     # 编译到 dist/（含 schema 与 tree-sitter wasm 资源）
+npm link          # 把 codegraph 命令注册到全局 PATH（Linux/macOS 可能需要 sudo）
 ```
 
-<sub>CodeGraph bundles its own runtime — nothing to compile, no native build, works the same everywhere. The installer puts `codegraph` on your PATH but **doesn't change your current shell** — open a new terminal before the next step so the command resolves.</sub>
+验证安装：
 
-<sub>**Upgrade any time** with `codegraph upgrade` — it detects how you installed (bundle, npm, or npx) and updates in place. Add `--check` to see if an update is available, or `codegraph upgrade <version>` to pin one.</sub>
+```bash
+codegraph --version
+```
+
+<sub>不想 `npm link` 污染全局？也可以直接用 `node /path/to/codegraph/dist/bin/codegraph.js` 调用，或在 MCP 配置里把 `command` 指向该路径。</sub>
+
+<sub>**升级方式**：在仓库目录 `git pull && npm ci && npm run build` 即可（上游的 `codegraph upgrade` 命令走的是上游 npm/bundle 发布渠道，**在本分支不要使用**）。升级后在各项目里跑 `codegraph index -f` 重建索引以获得新版引擎的覆盖。</sub>
 
 ### 2. Wire up your agent(s)
 
@@ -67,7 +89,7 @@ In a **new terminal**, run the installer to connect CodeGraph to the agents you 
 codegraph install
 ```
 
-<sub>Detects and auto-configures Claude Code, Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, and Kiro — wiring the CodeGraph MCP server into each. **This is the step that connects CodeGraph to your agent;** installing the CLI in step 1 does not do it on its own. (Shortcut: `npx @colbymchenry/codegraph` downloads and runs this in one go.)</sub>
+<sub>Detects and auto-configures Claude Code, Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, and Kiro — wiring the CodeGraph MCP server into each. **This is the step that connects CodeGraph to your agent;** installing the CLI in step 1 does not do it on its own.</sub>
 
 ### 3. Initialize each project
 
@@ -226,6 +248,7 @@ CodeGraph cuts **tokens, tool calls, and wall-clock time on every repo** — acr
 | **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
 | **Always Fresh** | File watcher uses native OS events (FSEvents/inotify/ReadDirectoryChangesW) with debounced auto-sync — the graph stays current as you code, zero config |
 | **20+ Languages** | TypeScript, JavaScript, Python, Go, Rust, Java, C#, PHP, Ruby, C, C++, Objective-C, Swift, Kotlin, Dart, Lua, Luau, Svelte, Liquid, Pascal/Delphi |
+| **项目知识图谱（本分支新增）** | README/markdown 文档、Agent 技能（SKILL.md）与记忆（CLAUDE.md/AGENTS.md）、Dockerfile/Compose、CI workflow、package.json 与代码同图，文档↔代码高置信互联 — [详情](docs/artifact-knowledge-graph.md) |
 | **Framework-aware Routes** | Recognizes web-framework routing files and links URL patterns to their handlers across 14 frameworks |
 | **Mixed iOS / React Native / Expo** | Closes cross-language flows that static parsing misses: Swift ↔ ObjC bridging, React Native legacy bridge + TurboModules + Fabric view components, native → JS event emitters, Expo Modules |
 | **100% Local** | No data leaves your machine. No API keys. No external services. SQLite database only |
@@ -315,8 +338,10 @@ Each bridge emits edges tagged `provenance:'heuristic'` with `metadata.synthesiz
 
 ### 1. Run the Installer
 
+完成[从源码安装](#1-从源码安装-cli)后，运行交互式安装器把 CodeGraph 接入你的 agent：
+
 ```bash
-npx @colbymchenry/codegraph
+codegraph install
 ```
 
 The installer will:
@@ -362,10 +387,9 @@ That's it — your agent will use CodeGraph tools automatically when a `.codegra
 <details>
 <summary><strong>Manual Setup (Alternative)</strong></summary>
 
-**Install globally:**
-```bash
-npm install -g @colbymchenry/codegraph
-```
+**先完成[从源码安装](#1-从源码安装-cli)**（`npm link` 后 `codegraph` 命令全局可用；
+不想 link 的话，把下面配置里的 `command` 换成 `node`、`args` 换成
+`["/path/to/codegraph/dist/bin/codegraph.js", "serve", "--mcp"]`）。
 
 **Add to `~/.claude.json`:**
 ```json
@@ -461,6 +485,8 @@ codegraph index [path]            # Full index (--force to re-index, --quiet for
 codegraph sync [path]             # Incremental update
 codegraph status [path]           # Show statistics
 codegraph query <search>          # Search symbols (--kind, --limit, --json)
+                                  #   --kind document / section 可检索文档、技能、记忆、CI 等制品节点
+                                  #   例: codegraph query "release" --kind document
 codegraph files [path]            # Show file structure (--format, --filter, --max-depth, --json)
 codegraph callers <symbol>        # Find what calls a function/method (--limit, --json)
 codegraph callees <symbol>        # Find what a function/method calls (--limit, --json)
@@ -515,13 +541,33 @@ When running as an MCP server, CodeGraph exposes these tools to Claude Code:
 | `codegraph_files` | Get indexed file structure (faster than filesystem scanning) |
 | `codegraph_status` | Check index health and statistics |
 
+### 查询项目知识（本分支新增）
+
+本分支的图谱还包含**项目知识制品**——README/markdown 文档、Agent 技能（`SKILL.md`）、
+Agent 记忆（`CLAUDE.md`/`AGENTS.md`/Cursor 规则）、Dockerfile/Compose、CI workflow、
+`package.json`——它们以 `document`/`section` 节点的形式与代码同图，**无需任何新工具**，
+agent 用同样的 `codegraph_explore` / `codegraph_search` 即可命中。直接向 agent 提问：
+
+- "README 里关于部署是怎么说的？"
+- "哪个 skill 负责发版流程？"
+- "CLAUDE.md 对测试有什么要求？"
+- "这个 Dockerfile 分几个构建 stage、打包了哪些文件？"
+- "改 `prepare-release.mjs` 会影响哪些文档和 CI job？"（文档→代码的 `references` 边反查）
+
+`codegraph_search` 的 `kind` 参数支持 `document` / `section` 过滤。文档中显式提到的文件
+路径和**全图唯一**的符号名会连边到对应代码节点；歧义提及一律不连（错边比没边更糟）。
+详见 [docs/artifact-knowledge-graph.md](docs/artifact-knowledge-graph.md)。
+
 ---
 
 ## Library Usage
 
-CodeGraph can be embedded directly. The npm package re-exports its programmatic
-API, so both `import` and `require` resolve the `CodeGraph` class in your own
-process — handy for embedding it in an app (e.g. an Electron main process).
+CodeGraph can be embedded directly. 本分支未发布到 npm，在你的项目里通过
+本地路径或 `npm link` 引入（API 与上游一致）：
+
+```bash
+npm i /path/to/codegraph     # 本地路径依赖；或在本仓库 npm link 后 npm link @colbymchenry/codegraph
+```
 
 ```typescript
 import CodeGraph from '@colbymchenry/codegraph';
@@ -551,9 +597,7 @@ that drive the graph directly: `DatabaseConnection`, `QueryBuilder`,
 
 **Embedding requirements**
 
-- Install from npm (`npm i @colbymchenry/codegraph`) so the matching
-  per-platform package — which carries the compiled library and its
-  dependencies — is fetched alongside the shim.
+- 先在本仓库执行 `npm run build`（本地路径依赖解析到 `dist/` 产物）。
 - The API runs on **your** runtime, so it needs **Node 22.5+** for the built-in
   `node:sqlite` (Electron qualifies when its bundled Node is 22.5+). The CLI and
   MCP server are unaffected — they run on the self-contained bundled runtime.
@@ -639,6 +683,18 @@ is written):
 | Lua | `.lua` | Full support (functions, methods with receivers, local variables, `require` imports, call edges) |
 | Luau | `.luau` | Full support (everything in Lua, plus `type`/`export type` aliases, typed signatures, and Roblox instance-path `require`) |
 
+### 项目知识制品（本分支新增）
+
+| 制品类型 | 匹配文件 | 图谱内容 |
+|---|---|---|
+| Markdown 文档 | `*.md` / `*.markdown` / `*.mdx` | document + 标题层级 section 树，全文可搜，文档→代码连边 |
+| Agent 技能 | `SKILL.md`、`*/skills/` 下的 markdown | frontmatter `name`/`description` 成为节点身份，按"技能做什么"可搜 |
+| Agent 记忆 / 指令 | `CLAUDE.md`、`AGENTS.md`、`GEMINI.md`、`.mdc`（Cursor 规则） | document(memory) + section 树，改动 ~1s 入图 |
+| Dockerfile | `Dockerfile`、`Containerfile`、`*.dockerfile` | 构建 stage 为 section，`COPY`/`RUN` 引用的项目文件连边 |
+| Docker Compose | `docker-compose*.yml`、`compose*.yaml` | service 为 section，dockerfile/env_file 连边 |
+| GitHub Actions | `.github/workflows/*.yml` | job 为 section，`run:` 脚本与本地 action 连边 |
+| 包清单 | `package.json` | npm script 为 section，入口字段（main/bin）连边 |
+
 ## Measured cross-file coverage
 
 Impact and blast-radius queries are only as good as the dependency graph behind them, so coverage is measured rather than asserted. **Fair coverage** = the share of symbol-bearing source files that have at least one *resolved cross-file dependent* — something that imports, calls, references, or (through a framework convention) routes to them — on a real-world benchmark repo per language. The residual is always a genuine static-analysis frontier (runtime dynamic dispatch, reflection / DI containers, framework-convention entry points, vendored third-party code), never hidden by gaming the denominator.
@@ -677,7 +733,7 @@ Framework routing is validated the same way, on a canonical app per framework: E
 
 **MCP hits `database is locked`** — current builds shouldn't: CodeGraph bundles its own Node runtime and uses Node's built-in `node:sqlite` in WAL mode, where concurrent reads never block on a writer. If you still see it:
 
-- **You're on an old (pre-0.9) install.** Reinstall to get the bundled runtime — `curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh` (macOS/Linux), `irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex` (Windows), or `npm i -g @colbymchenry/codegraph@latest`.
+- **You're on an old build.** 在仓库目录 `git pull && npm ci && npm run build` 更新到最新源码构建。
 - **`codegraph status` shows `Journal:` other than `wal`** — WAL couldn't be enabled on this filesystem (common on network shares and WSL2 `/mnt`), so reads can block on writes. Move the project (with its `.codegraph/` folder) onto a local disk.
 
 **MCP server not connecting** — Ensure the project is initialized/indexed, verify the path in your MCP config, and check that `codegraph serve --mcp` works from the command line.
@@ -706,6 +762,6 @@ MIT
 
 **Made for AI coding agents — Claude Code, Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, and Kiro**
 
-[Report Bug](https://github.com/colbymchenry/codegraph/issues) · [Request Feature](https://github.com/colbymchenry/codegraph/issues)
+[Report Bug](https://github.com/Mint-hfut/codegraph/issues) · [Request Feature](https://github.com/Mint-hfut/codegraph/issues) · [上游项目](https://github.com/colbymchenry/codegraph)
 
 </div>
