@@ -39,6 +39,7 @@ import { logDebug, logWarn } from '../errors';
 import { normalizePath } from '../utils';
 import { isCodeGraphDataDir } from '../directory';
 import { watchDisabledReason } from './watch-policy';
+import { ExtraRoot, isExtraRootVirtualPath, virtualPathFor } from '../extra-roots';
 
 /**
  * Native recursive `fs.watch` is only reliable on macOS and Windows; on Linux
@@ -98,6 +99,13 @@ export interface WatchOptions {
    * Callback when a sync errors (for logging/diagnostics).
    */
   onSyncError?: (error: Error) => void;
+
+  /**
+   * Extra index roots (agent skills / memory outside the project tree).
+   * Each gets its own watch; events map to `~extra/<name>/…` virtual paths
+   * so the same debounced sync pipeline covers them.
+   */
+  extraRoots?: ExtraRoot[];
 
   /**
    * Test-only. When true, `start()` installs NO OS-level fs.watch — the
@@ -163,6 +171,8 @@ export class FileWatcher {
   private recursiveWatcher: fs.FSWatcher | null = null;
   /** Linux: one watcher per watched directory (keyed by absolute path). */
   private dirWatchers = new Map<string, fs.FSWatcher>();
+  /** Watchers covering extra roots (recursive per dir-root on macOS/Windows, parent-dir for file roots). */
+  private extraWatchers: fs.FSWatcher[] = [];
   /** Set once the per-directory watch cap is hit, so we log only once. */
   private dirCapWarned = false;
   /** Test-only inert mode: started, but with no OS watcher installed. */
@@ -211,6 +221,7 @@ export class FileWatcher {
   private readonly onSyncComplete?: WatchOptions['onSyncComplete'];
   private readonly onSyncError?: WatchOptions['onSyncError'];
   private readonly inertForTests: boolean;
+  private readonly extraRoots: ExtraRoot[];
 
   constructor(
     projectRoot: string,
@@ -223,6 +234,7 @@ export class FileWatcher {
     this.onSyncComplete = options.onSyncComplete;
     this.onSyncError = options.onSyncError;
     this.inertForTests = options.inertForTests ?? false;
+    this.extraRoots = options.extraRoots ?? [];
   }
 
   /**
@@ -252,8 +264,10 @@ export class FileWatcher {
         this.inert = true;
       } else if (supportsRecursiveWatch()) {
         this.startRecursive();
+        this.startExtraRoots();
       } else {
         this.startPerDirectory();
+        this.startExtraRoots();
       }
 
       // No async crawl to wait on: as soon as the watch set is installed we
@@ -309,6 +323,44 @@ export class FileWatcher {
   }
 
   /**
+   * Watch the configured extra roots (skills / memory outside the tree).
+   * Directory roots get the per-platform strategy the project root uses
+   * (one recursive stream, or per-directory inotify); single-file roots
+   * watch the PARENT directory and filter by basename — editors replace
+   * files atomically, which kills a watch installed on the file itself.
+   * Events surface as `~extra/<name>/…` virtual paths. Best-effort: a root
+   * that fails to watch falls back to manual/git-hook sync, never breaks
+   * project watching.
+   */
+  private startExtraRoots(): void {
+    for (const root of this.extraRoots) {
+      try {
+        if (root.isFile) {
+          const dir = path.dirname(root.absPath);
+          const base = path.basename(root.absPath);
+          const w = fs.watch(dir, { persistent: true }, (_event, filename) => {
+            if (this.stopped || filename == null) return;
+            if (String(filename) === base) this.handleChange(virtualPathFor(root.name, ''));
+          });
+          w.on('error', () => { /* root vanished — manual sync is the backstop */ });
+          this.extraWatchers.push(w);
+        } else if (supportsRecursiveWatch()) {
+          const w = fs.watch(root.absPath, { recursive: true, persistent: true }, (_event, filename) => {
+            if (this.stopped || filename == null) return;
+            this.handleChange(virtualPathFor(root.name, normalizePath(String(filename))));
+          });
+          w.on('error', () => { /* best-effort */ });
+          this.extraWatchers.push(w);
+        } else {
+          this.watchTree(root.absPath, /* markExisting */ false, root);
+        }
+      } catch (err) {
+        logWarn('Could not watch extra root', { root: root.absPath, error: String(err) });
+      }
+    }
+  }
+
+  /**
    * Add an inotify watch for `dir` and recurse into its non-ignored
    * subdirectories. When `markExisting` is true (a directory that appeared
    * AFTER startup), the source files already inside it are recorded as pending
@@ -317,7 +369,7 @@ export class FileWatcher {
    * full sync. The initial startup walk passes false (the engine's catch-up
    * sync owns the baseline).
    */
-  private watchTree(dir: string, markExisting: boolean): void {
+  private watchTree(dir: string, markExisting: boolean, extraRoot?: ExtraRoot): void {
     if (this.dirWatchers.has(dir)) return;
     if (this.dirWatchers.size >= maxDirWatches()) {
       if (!this.dirCapWarned) {
@@ -332,7 +384,7 @@ export class FileWatcher {
     let w: fs.FSWatcher;
     try {
       w = fs.watch(dir, { persistent: true }, (_event, filename) =>
-        this.handleDirEvent(dir, filename)
+        this.handleDirEvent(dir, filename, extraRoot)
       );
     } catch {
       // ENOENT / EACCES / too-many-open-files — skip this directory quietly.
@@ -350,12 +402,23 @@ export class FileWatcher {
     for (const entry of entries) {
       const child = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (this.shouldIgnoreDir(child)) continue;
-        this.watchTree(child, markExisting);
+        if (this.shouldIgnoreDir(child, extraRoot)) continue;
+        this.watchTree(child, markExisting, extraRoot);
       } else if (markExisting && entry.isFile()) {
-        this.handleChange(normalizePath(path.relative(this.projectRoot, child)));
+        this.handleChange(this.toRelPath(child, extraRoot));
       }
     }
+  }
+
+  /**
+   * Map an absolute path to the project-relative (or `~extra/<name>/…`
+   * virtual) path the rest of the pipeline keys on.
+   */
+  private toRelPath(absPath: string, extraRoot?: ExtraRoot): string {
+    if (extraRoot) {
+      return virtualPathFor(extraRoot.name, normalizePath(path.relative(extraRoot.absPath, absPath)));
+    }
+    return normalizePath(path.relative(this.projectRoot, absPath));
   }
 
   /**
@@ -363,7 +426,7 @@ export class FileWatcher {
    * sub-directory is picked up by extending the watch tree; everything else is
    * routed through the shared change handler.
    */
-  private handleDirEvent(dir: string, filename: string | Buffer | null): void {
+  private handleDirEvent(dir: string, filename: string | Buffer | null, extraRoot?: ExtraRoot): void {
     if (this.stopped || filename == null) return;
     const full = path.join(dir, String(filename));
 
@@ -373,14 +436,14 @@ export class FileWatcher {
     // fall through to the change handler, which no-ops on a non-source path.
     try {
       if (fs.statSync(full).isDirectory()) {
-        if (!this.shouldIgnoreDir(full)) this.watchTree(full, /* markExisting */ true);
+        if (!this.shouldIgnoreDir(full, extraRoot)) this.watchTree(full, /* markExisting */ true, extraRoot);
         return;
       }
     } catch {
       // deleted/inaccessible — treat as a normal change below
     }
 
-    this.handleChange(normalizePath(path.relative(this.projectRoot, full)));
+    this.handleChange(this.toRelPath(full, extraRoot));
   }
 
   /**
@@ -396,7 +459,14 @@ export class FileWatcher {
   private handleChange(rel: string): void {
     if (!rel || rel === '.' || rel.startsWith('..')) return;
     if (this.isAlwaysIgnored(rel)) return;
-    if (this.ignoreMatcher && this.ignoreMatcher.ignores(rel)) return;
+    // Virtual extra-root paths skip the project's .gitignore matcher — the
+    // project's ignore rules don't describe a directory outside the tree.
+    // VCS/dependency noise inside an extra root is dropped here instead.
+    if (isExtraRootVirtualPath(rel)) {
+      if (/(^|\/)(\.git|node_modules|__pycache__|\.venv|venv)\//.test(rel)) return;
+    } else if (this.ignoreMatcher && this.ignoreMatcher.ignores(rel)) {
+      return;
+    }
     if (!isSourceFile(rel)) return;
 
     logDebug('File change detected', { file: rel });
@@ -441,7 +511,13 @@ export class FileWatcher {
    * Linux per-directory watch tree). Tests the directory form of the path so a
    * dir-only ignore rule like `build/` matches.
    */
-  private shouldIgnoreDir(dirPath: string): boolean {
+  private shouldIgnoreDir(dirPath: string, extraRoot?: ExtraRoot): boolean {
+    if (extraRoot) {
+      // Project .gitignore doesn't apply outside the tree — skip only
+      // VCS/dependency dirs by name.
+      const base = path.basename(dirPath);
+      return ['.git', 'node_modules', '.codegraph', '__pycache__', '.venv', 'venv'].includes(base);
+    }
     const rel = normalizePath(path.relative(this.projectRoot, dirPath));
     if (!rel || rel === '.' || rel.startsWith('..')) return false; // root / outside
     if (this.isAlwaysIgnored(rel)) return true;
@@ -476,6 +552,14 @@ export class FileWatcher {
       }
     }
     this.dirWatchers.clear();
+    for (const w of this.extraWatchers) {
+      try {
+        w.close();
+      } catch {
+        /* already closed */
+      }
+    }
+    this.extraWatchers.length = 0;
     this.dirCapWarned = false;
     this.inert = false;
 

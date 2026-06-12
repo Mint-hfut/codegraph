@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Node } from '../types';
+import { classifyMarkdownDocType } from '../extraction/artifacts/detect';
 
 /** Normalize a name to a comparable token: lowercase, alphanumerics only. */
 export function normalizeNameToken(raw: string): string {
@@ -409,8 +410,28 @@ export function kindBonus(kind: Node['kind']): number {
     file: 0,
     protocol: 9,
     enum_member: 3,
+    document: 4,
+    section: 3,
   };
   return bonuses[kind] ?? 0;
+}
+
+/**
+ * Extra rank weight for knowledge documents and their sections, by semantic
+ * type (derived from the file path, same classification the extractor uses).
+ * Agent memory files are standing instructions — when a query matches one it
+ * should surface ahead of ordinary docs; skills next, READMEs after that.
+ * Combined with the `document`/`section` kind bonus this puts a matching
+ * memory file on par with a matching function.
+ */
+export function docTypeBonus(node: Pick<Node, 'kind' | 'filePath'>): number {
+  if (node.kind !== 'document' && node.kind !== 'section') return 0;
+  switch (classifyMarkdownDocType(node.filePath)) {
+    case 'memory': return 6;
+    case 'skill': return 4;
+    case 'readme': return 2;
+    default: return 0;
+  }
 }
 
 /**

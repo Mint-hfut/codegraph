@@ -22,12 +22,14 @@ import {
   isComposePath,
   isWorkflowPath,
   isPackageManifestPath,
+  isAssetPath,
 } from './detect';
 import { MarkdownExtractor } from './markdown-extractor';
 import { DockerfileExtractor } from './dockerfile-extractor';
 import { ComposeExtractor } from './compose-extractor';
 import { WorkflowExtractor } from './workflow-extractor';
 import { PackageJsonExtractor } from './package-json-extractor';
+import { AssetExtractor } from './asset-extractor';
 
 export interface ArtifactExtractorEntry {
   /** Stable name, used in diagnostics. */
@@ -63,6 +65,11 @@ export const ARTIFACT_EXTRACTORS: ArtifactExtractorEntry[] = [
     name: 'markdown',
     matches: isMarkdownPath,
     extract: (f, s) => new MarkdownExtractor(f, s).extract(),
+  },
+  {
+    name: 'asset',
+    matches: isAssetPath,
+    extract: (f, s) => new AssetExtractor(f, s).extract(),
   },
 ];
 

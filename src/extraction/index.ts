@@ -21,6 +21,9 @@ import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLangu
 import { isCodeGraphDataDir } from '../directory';
 import { logDebug, logWarn } from '../errors';
 import { validatePathWithinRoot, normalizePath } from '../utils';
+import { getExtraRoots, scanExtraRoot } from '../extra-roots';
+import { isAssetPath } from './artifacts/detect';
+import { assetPlaceholder } from './artifacts/asset-extractor';
 import ignore, { Ignore } from 'ignore';
 import { detectFrameworks } from '../resolution/frameworks';
 import type { ResolutionContext } from '../resolution/types';
@@ -405,8 +408,9 @@ export function scanDirectory(
 ): string[] {
   // Fast path: use git to get all visible files (respects .gitignore everywhere)
   const gitFiles = getGitVisibleFiles(rootDir);
+  let files: string[];
   if (gitFiles) {
-    const files: string[] = [];
+    files = [];
     let count = 0;
     for (const filePath of gitFiles) {
       if (isSourceFile(filePath)) {
@@ -415,11 +419,29 @@ export function scanDirectory(
         onProgress?.(count, filePath);
       }
     }
-    return files;
+  } else {
+    // Fallback: walk filesystem for non-git projects
+    files = scanDirectoryWalk(rootDir, onProgress);
   }
+  files.push(...scanExtraRootFiles(rootDir));
+  return files;
+}
 
-  // Fallback: walk filesystem for non-git projects
-  return scanDirectoryWalk(rootDir, onProgress);
+/**
+ * Indexable files from the project's registered extra roots (agent skills,
+ * persistent memory living outside the tree), as `~extra/<name>/…` virtual
+ * paths. Empty when no extra roots are configured — the common case.
+ */
+function scanExtraRootFiles(rootDir: string): string[] {
+  const roots = getExtraRoots(rootDir);
+  if (roots.length === 0) return [];
+  const files: string[] = [];
+  for (const root of roots) {
+    for (const virtualPath of scanExtraRoot(root)) {
+      if (isSourceFile(virtualPath)) files.push(virtualPath);
+    }
+  }
+  return files;
 }
 
 /**
@@ -431,8 +453,9 @@ export async function scanDirectoryAsync(
   onProgress?: (current: number, file: string) => void
 ): Promise<string[]> {
   const gitFiles = getGitVisibleFiles(rootDir);
+  let files: string[];
   if (gitFiles) {
-    const files: string[] = [];
+    files = [];
     let count = 0;
     for (const filePath of gitFiles) {
       if (isSourceFile(filePath)) {
@@ -445,10 +468,11 @@ export async function scanDirectoryAsync(
         }
       }
     }
-    return files;
+  } else {
+    files = scanDirectoryWalk(rootDir, onProgress);
   }
-
-  return scanDirectoryWalk(rootDir, onProgress);
+  files.push(...scanExtraRootFiles(rootDir));
+  return files;
 }
 
 /**
@@ -908,6 +932,13 @@ export class ExtractionOrchestrator {
               logWarn('Path traversal blocked in batch reader', { filePath: fp });
               return { filePath: fp, content: null as string | null, stats: null as fs.Stats | null, error: new Error('Path traversal blocked') };
             }
+            // Binary assets are indexed by name only — never read their bytes.
+            // A stat-derived placeholder stands in for content so hashing /
+            // change detection still works (see asset-extractor.ts).
+            if (isAssetPath(fp)) {
+              const stats = await fsp.stat(fullPath);
+              return { filePath: fp, content: assetPlaceholder(stats.size, stats.mtimeMs), stats, error: null as Error | null };
+            }
             const content = await fsp.readFile(fullPath, 'utf-8');
             const stats = await fsp.stat(fullPath);
             return { filePath: fp, content, stats, error: null as Error | null };
@@ -957,8 +988,9 @@ export class ExtractionOrchestrator {
         // headers, minified bundles, and other multi-MB files get indexed,
         // wasting WASM heap and the worker recycle budget on inputs with no
         // useful symbols. The single-file extractFile path already enforces
-        // this; the bulk path used to silently skip the check.
-        if (stats.size > MAX_FILE_SIZE) {
+        // this; the bulk path used to silently skip the check. Binary assets
+        // are exempt — their bytes are never read, only the name is indexed.
+        if (stats.size > MAX_FILE_SIZE && !isAssetPath(filePath)) {
           processed++;
           filesSkipped++;
           errors.push({
@@ -1056,9 +1088,11 @@ export class ExtractionOrchestrator {
         recycleWorker();
 
         let content: string;
+        let retryFullPath: string;
         try {
           const fullPath = validatePathWithinRoot(this.rootDir, filePath);
           if (!fullPath) continue;
+          retryFullPath = fullPath;
           content = await fsp.readFile(fullPath, 'utf-8');
         } catch {
           continue;
@@ -1074,7 +1108,7 @@ export class ExtractionOrchestrator {
 
         if (result.nodes.length > 0 || result.errors.length === 0) {
           const language = detectLanguage(filePath, content);
-          const stats = await fsp.stat(path.join(this.rootDir, filePath));
+          const stats = await fsp.stat(retryFullPath);
           this.storeExtractionResult(filePath, content, language, stats, result);
 
           const idx = errors.indexOf(errEntry);
@@ -1101,9 +1135,11 @@ export class ExtractionOrchestrator {
           recycleWorker();
 
           let fullContent: string;
+          let strippedFullPath: string;
           try {
             const fullPath = validatePathWithinRoot(this.rootDir, filePath);
             if (!fullPath) continue;
+            strippedFullPath = fullPath;
             fullContent = await fsp.readFile(fullPath, 'utf-8');
           } catch {
             continue;
@@ -1125,7 +1161,7 @@ export class ExtractionOrchestrator {
 
           if (result.nodes.length > 0 || result.errors.length === 0) {
             const language = detectLanguage(filePath, fullContent);
-            const stats = await fsp.stat(path.join(this.rootDir, filePath));
+            const stats = await fsp.stat(strippedFullPath);
             this.storeExtractionResult(filePath, fullContent, language, stats, result);
 
             const idx = errors.indexOf(errEntry);
@@ -1221,12 +1257,15 @@ export class ExtractionOrchestrator {
       };
     }
 
-    // Read file content and stats
+    // Read file content and stats. Binary assets get a stat-derived
+    // placeholder instead of a read — name-only indexing.
     let content: string;
     let stats: fs.Stats;
     try {
       stats = await fsp.stat(fullPath);
-      content = await fsp.readFile(fullPath, 'utf-8');
+      content = isAssetPath(relativePath)
+        ? assetPlaceholder(stats.size, stats.mtimeMs)
+        : await fsp.readFile(fullPath, 'utf-8');
     } catch (error) {
       return {
         nodes: [],
@@ -1269,8 +1308,8 @@ export class ExtractionOrchestrator {
       };
     }
 
-    // Check file size
-    if (stats.size > MAX_FILE_SIZE) {
+    // Check file size (binary assets exempt — their bytes are never read)
+    if (stats.size > MAX_FILE_SIZE && !isAssetPath(relativePath)) {
       return {
         nodes: [],
         edges: [],
@@ -1433,8 +1472,11 @@ export class ExtractionOrchestrator {
     // Removals: tracked in the DB but no longer a present source file. Check the
     // filesystem directly — `scanDirectory` (via `git ls-files`) still lists a
     // file deleted from disk but not yet staged, so set membership alone misses it.
+    // validatePathWithinRoot also resolves `~extra/<name>/…` virtual paths; a
+    // null (unregistered/escaping path) counts as removed.
     for (const tracked of trackedFiles) {
-      if (!currentSet.has(tracked.path) || !fs.existsSync(path.join(this.rootDir, tracked.path))) {
+      const trackedAbs = validatePathWithinRoot(this.rootDir, tracked.path);
+      if (!currentSet.has(tracked.path) || !trackedAbs || !fs.existsSync(trackedAbs)) {
         this.queries.deleteFile(tracked.path);
         filesRemoved++;
       }
@@ -1442,7 +1484,8 @@ export class ExtractionOrchestrator {
 
     // Adds / modifications.
     for (const filePath of currentFiles) {
-      const fullPath = path.join(this.rootDir, filePath);
+      const fullPath = validatePathWithinRoot(this.rootDir, filePath);
+      if (!fullPath) continue;
       const tracked = trackedMap.get(filePath);
 
       // Cheap pre-filter: an already-indexed file whose size AND mtime both match
@@ -1462,10 +1505,13 @@ export class ExtractionOrchestrator {
         }
       }
 
-      // New, or size/mtime changed — read + hash to confirm a real content change.
+      // New, or size/mtime changed — read + hash to confirm a real content
+      // change. Binary assets hash a stat placeholder instead of their bytes.
       let content: string;
       try {
-        content = fs.readFileSync(fullPath, 'utf-8');
+        content = isAssetPath(filePath)
+          ? (() => { const st = fs.statSync(fullPath); return assetPlaceholder(st.size, st.mtimeMs); })()
+          : fs.readFileSync(fullPath, 'utf-8');
       } catch (error) {
         logDebug('Skipping unreadable file during sync', { filePath, error: String(error) });
         continue;
@@ -1548,7 +1594,9 @@ export class ExtractionOrchestrator {
         const fullPath = path.join(this.rootDir, filePath);
         let content: string;
         try {
-          content = fs.readFileSync(fullPath, 'utf-8');
+          content = isAssetPath(filePath)
+            ? (() => { const st = fs.statSync(fullPath); return assetPlaceholder(st.size, st.mtimeMs); })()
+            : fs.readFileSync(fullPath, 'utf-8');
         } catch (error) {
           logDebug('Skipping unreadable file while detecting changes', { filePath, error: String(error) });
           continue;
@@ -1590,10 +1638,13 @@ export class ExtractionOrchestrator {
 
     // Find added and modified files
     for (const filePath of currentFiles) {
-      const fullPath = path.join(this.rootDir, filePath);
+      const fullPath = validatePathWithinRoot(this.rootDir, filePath);
+      if (!fullPath) continue;
       let content: string;
       try {
-        content = fs.readFileSync(fullPath, 'utf-8');
+        content = isAssetPath(filePath)
+          ? (() => { const st = fs.statSync(fullPath); return assetPlaceholder(st.size, st.mtimeMs); })()
+          : fs.readFileSync(fullPath, 'utf-8');
       } catch (error) {
         logDebug('Skipping unreadable file while detecting changes', { filePath, error: String(error) });
         continue;

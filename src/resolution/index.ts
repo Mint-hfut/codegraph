@@ -20,6 +20,7 @@ import { matchReference, matchByFilePath, matchDottedCallChain, matchScopedCallC
 import { resolveViaImport, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef } from './import-resolver';
 import { detectFrameworks } from './frameworks';
 import { synthesizeCallbackEdges } from './callback-synthesizer';
+import { synthesizeSkillBundleEdges } from './skill-bundle';
 import { loadProjectAliases, type AliasMap } from './path-aliases';
 import { loadGoModule, type GoModule } from './go-module';
 import { loadWorkspacePackages, type WorkspacePackages } from './workspace-packages';
@@ -1039,6 +1040,14 @@ export class ReferenceResolver {
       aggregateStats.byMethod['callback-synthesis'] = synthesizeCallbackEdges(this.queries, this.context);
     } catch {
       // synthesis is additive and optional; ignore failures
+    }
+
+    // Skill bundles: link each SKILL.md document to every file in its
+    // directory subtree (same-directory membership is deterministic).
+    try {
+      aggregateStats.byMethod['skill-bundle'] = synthesizeSkillBundleEdges(this.queries);
+    } catch {
+      // additive and optional; ignore failures
     }
 
     return {

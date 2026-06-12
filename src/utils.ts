@@ -31,6 +31,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { isExtraRootVirtualPath, resolveExtraRootPath } from './extra-roots';
 
 // ============================================================
 // SECURITY UTILITIES
@@ -97,6 +98,15 @@ function isWithinDir(child: string, parent: string): boolean {
  *   escapes the root
  */
 export function validatePathWithinRoot(projectRoot: string, filePath: string): string | null {
+  // Virtual extra-root paths (`~extra/<name>/…`) resolve against the root
+  // registered from the project's own config — never against the project
+  // tree. resolveExtraRootPath applies the same lexical + realpath
+  // containment checks against that root, so the chokepoint property holds:
+  // nothing outside an explicitly registered root is ever readable.
+  if (isExtraRootVirtualPath(filePath)) {
+    return resolveExtraRootPath(projectRoot, filePath);
+  }
+
   const resolved = path.resolve(projectRoot, filePath);
   const normalizedRoot = path.resolve(projectRoot);
 

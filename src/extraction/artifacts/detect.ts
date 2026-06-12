@@ -17,7 +17,8 @@ export type DocType =
   | 'dockerfile'
   | 'compose'
   | 'workflow'
-  | 'package-manifest';
+  | 'package-manifest'
+  | 'asset';
 
 function basenameOf(filePath: string): string {
   const i = filePath.lastIndexOf('/');
@@ -53,11 +54,39 @@ export function isPackageManifestPath(filePath: string): boolean {
   return basenameOf(filePath) === 'package.json';
 }
 
+/**
+ * Binary asset extensions tracked by NAME ONLY — the file's content is never
+ * read (no utf-8 decode, no parse, no size cap). The graph gets a
+ * `file → document(signature='asset')` pair so docs/code that mention the
+ * asset by path can link to it and agents can find it by name.
+ */
+const ASSET_EXTENSIONS = new Set([
+  // Images
+  'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp', 'tiff', 'avif',
+  // Video / audio
+  'mp4', 'mov', 'avi', 'mkv', 'webm', 'mp3', 'wav', 'ogg', 'flac', 'm4a',
+  // Documents
+  'pdf',
+  // Fonts
+  'ttf', 'otf', 'woff', 'woff2', 'eot',
+  // Archives
+  'zip', 'tar', 'gz', 'tgz', '7z',
+]);
+
+/** Binary asset (image / video / audio / PDF / font / archive) — name-only indexing. */
+export function isAssetPath(filePath: string): boolean {
+  const base = basenameOf(filePath);
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) return false;
+  return ASSET_EXTENSIONS.has(base.slice(dot + 1).toLowerCase());
+}
+
 /** Any path handled by an artifact extractor that ISN'T already an indexed extension. */
 export function isExtraArtifactSourceFile(filePath: string): boolean {
   // Markdown / compose / workflow extensions are added to EXTENSION_MAP (or
-  // already there for YAML); only the extensionless / JSON cases need this.
-  return isDockerfilePath(filePath) || isPackageManifestPath(filePath);
+  // already there for YAML); the extensionless / JSON / binary-asset cases
+  // need this.
+  return isDockerfilePath(filePath) || isPackageManifestPath(filePath) || isAssetPath(filePath);
 }
 
 /**
@@ -69,8 +98,9 @@ export function isExtraArtifactSourceFile(filePath: string): boolean {
 export function classifyMarkdownDocType(filePath: string): DocType {
   const base = basenameOf(filePath);
   // Skills: SKILL.md convention (Claude Code / opencode), or any markdown
-  // living under a tool's skills/ directory.
-  if (/^SKILL\.md$/i.test(base) || /(^|\/)\.?[\w-]+\/skills\//.test(filePath)) {
+  // living under a tool's skills/ directory. `[~.]?` admits the `~extra`
+  // virtual prefix (extra index roots) alongside dotted dirs (`.claude`).
+  if (/^SKILL\.md$/i.test(base) || /(^|\/)[~.]?[\w-]+\/skills\//.test(filePath)) {
     return 'skill';
   }
   // Long-term agent memory / instruction files.

@@ -4369,7 +4369,8 @@ export function extractFromSource(
   } else if (
     detectedLanguage === 'markdown' ||
     detectedLanguage === 'dockerfile' ||
-    detectedLanguage === 'json'
+    detectedLanguage === 'json' ||
+    detectedLanguage === 'binary'
   ) {
     // Artifact-family language without a registry match (defensive against
     // predicate drift) — track at the file level only, like yaml/twig.

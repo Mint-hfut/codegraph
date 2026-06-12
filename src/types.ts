@@ -105,6 +105,9 @@ export const LANGUAGES = [
   'markdown',
   'dockerfile',
   'json',
+  // Binary assets (images, video, audio, PDF, fonts, archives) tracked by
+  // name only — content is never read.
+  'binary',
   'unknown',
 ] as const;
 

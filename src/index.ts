@@ -49,6 +49,7 @@ import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
 import { EXTRACTION_VERSION } from './extraction/extraction-version';
 import { getCodeGraphDir } from './directory';
+import { loadExtraRoots, registerExtraRoots, getExtraRoots } from './extra-roots';
 import { deriveProjectNameTokens } from './search/query-utils';
 import { CodeGraphPackageVersion } from './mcp/version';
 
@@ -86,6 +87,8 @@ export {
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
 export { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
 export { MCPServer } from './mcp';
+// Extra index roots (skills / persistent memory outside the project tree).
+export { ExtraRoot, EXTRA_ROOT_PREFIX, loadExtraRoots, parseExtraRoots } from './extra-roots';
 
 /**
  * Options for initializing a new CodeGraph project
@@ -165,6 +168,15 @@ export class CodeGraph {
     this.fileLock = new FileLock(
       path.join(getCodeGraphDir(projectRoot), 'codegraph.lock')
     );
+    // Extra index roots (skills / memory outside the project tree) from
+    // .codegraph/config.json. Registered before the orchestrator/resolver so
+    // scanning, sync, and path resolution all see them. Best-effort — a bad
+    // config must never block opening the project.
+    try {
+      registerExtraRoots(projectRoot, loadExtraRoots(projectRoot, getCodeGraphDir(projectRoot)));
+    } catch {
+      // ignore — extra roots stay empty
+    }
     this.orchestrator = new ExtractionOrchestrator(projectRoot, queries);
     this.resolver = createResolver(projectRoot, queries);
     this.graphManager = new GraphQueryManager(queries);
@@ -555,7 +567,9 @@ export class CodeGraph {
         const filesChanged = result.filesAdded + result.filesModified + result.filesRemoved;
         return { filesChanged, durationMs: result.durationMs };
       },
-      options
+      // Watch the registered extra roots too (skills / memory outside the
+      // tree) unless the caller supplied an explicit list.
+      { extraRoots: getExtraRoots(this.projectRoot), ...options }
     );
 
     return this.watcher.start();

@@ -47,13 +47,16 @@
 
 | | 上游 CodeGraph | 本分支 |
 |---|---|---|
-| **图谱覆盖范围** | 仅代码（tree-sitter 解析的源码符号） | 代码 **+ 项目知识制品**：markdown 文档、Agent 技能/记忆、Dockerfile/Containerfile、docker-compose、GitHub Actions workflow、package.json |
-| **节点类型** | 22 种代码 NodeKind | 新增 `document`（语义类型：readme / skill / memory / doc / dockerfile / compose / workflow / package-manifest）与 `section`（标题层级 / 构建 stage / service / CI job / npm script） |
+| **图谱覆盖范围** | 仅代码（tree-sitter 解析的源码符号） | 代码 **+ 项目知识制品**：markdown 文档、Agent 技能/记忆、Dockerfile/Containerfile、docker-compose、GitHub Actions workflow、package.json，以及**只记名字的二进制资产**（图片/视频/PDF 等，内容零读取） |
+| **节点类型** | 22 种代码 NodeKind | 新增 `document`（语义类型：readme / skill / memory / doc / dockerfile / compose / workflow / package-manifest / asset）与 `section`（标题层级 / 构建 stage / service / CI job / npm script） |
 | **文档 ↔ 代码连边** | 无 | 高置信 `references` 边：文档中的显式文件路径、全图唯一的符号名才连边，**歧义一律不连**（错边比没边更糟），边带 `resolvedBy: 'doc-mention'` 可审计 |
+| **项目外知识（skills/记忆）** | 无 | `.codegraph/config.json` 的 `extraRoots` 可挂载 `~/.claude/skills`、用户级 `CLAUDE.md` 等项目外目录/文件，以 `~extra/…` 虚拟路径入图，实时监听与同步同样生效 |
+| **Skill 强关联** | 无 | `SKILL.md` 自动连边到同目录全部文件（脚本、参考文档）——问一个 skill，整个捆绑包一起出 |
+| **搜索排序** | 统一按符号种类加权 | 知识文件按语义类型再加权：**memory > skill > readme > 普通 doc**，常驻指令优先浮出 |
 | **Agent 能回答的问题** | "X 是怎么工作的"等代码结构/流程问题 | 额外支持 "README 里关于部署是怎么说的" "哪个 skill 负责发版" "CLAUDE.md 对测试有什么要求" "改这个函数会影响哪些文档/CI" |
 | **实时更新** | 代码文件改动 ~1s 入图 | 同一管线覆盖制品文件——改完 `CLAUDE.md`/`SKILL.md` 约 1 秒后图谱即最新 |
 | **安装方式** | npm / 一键安装脚本（预编译 bundle） | 从源码构建（见下文），其余 `codegraph install` / `init` 用法与上游一致 |
-| **索引版本** | EXTRACTION_VERSION 14 | 15（存量索引会提示重建，`codegraph index -f` 即可） |
+| **索引版本** | EXTRACTION_VERSION 14 | 16（存量索引会提示重建，`codegraph index -f` 即可） |
 
 架构、原理与扩展方法详见 [docs/artifact-knowledge-graph.md](docs/artifact-knowledge-graph.md)。
 
@@ -248,7 +251,7 @@ CodeGraph cuts **tokens, tool calls, and wall-clock time on every repo** — acr
 | **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
 | **Always Fresh** | File watcher uses native OS events (FSEvents/inotify/ReadDirectoryChangesW) with debounced auto-sync — the graph stays current as you code, zero config |
 | **20+ Languages** | TypeScript, JavaScript, Python, Go, Rust, Java, C#, PHP, Ruby, C, C++, Objective-C, Swift, Kotlin, Dart, Lua, Luau, Svelte, Liquid, Pascal/Delphi |
-| **项目知识图谱（本分支新增）** | README/markdown 文档、Agent 技能（SKILL.md）与记忆（CLAUDE.md/AGENTS.md）、Dockerfile/Compose、CI workflow、package.json 与代码同图，文档↔代码高置信互联 — [详情](docs/artifact-knowledge-graph.md) |
+| **项目知识图谱（本分支新增）** | README/markdown 文档、Agent 技能（SKILL.md，含同目录捆绑包强关联）与记忆（CLAUDE.md/AGENTS.md，搜索权重更高）、Dockerfile/Compose、CI workflow、package.json、二进制资产（只记名字）与代码同图，文档↔代码高置信互联；`extraRoots` 支持索引项目外的全局技能/记忆 — [详情](docs/artifact-knowledge-graph.md) |
 | **Framework-aware Routes** | Recognizes web-framework routing files and links URL patterns to their handlers across 14 frameworks |
 | **Mixed iOS / React Native / Expo** | Closes cross-language flows that static parsing misses: Swift ↔ ObjC bridging, React Native legacy bridge + TurboModules + Fabric view components, native → JS event emitters, Expo Modules |
 | **100% Local** | No data leaves your machine. No API keys. No external services. SQLite database only |
@@ -556,6 +559,23 @@ agent 用同样的 `codegraph_explore` / `codegraph_search` 即可命中。直�
 
 `codegraph_search` 的 `kind` 参数支持 `document` / `section` 过滤。文档中显式提到的文件
 路径和**全图唯一**的符号名会连边到对应代码节点；歧义提及一律不连（错边比没边更糟）。
+记忆文件在搜索排序中权重高于普通文档（memory > skill > readme > doc）；图片/视频/PDF
+等二进制资产**只索引名字**（内容零读取），README 里的图片链接会连到对应资产节点。
+
+**项目外的技能与记忆**（如 `~/.claude/skills`、用户级 `CLAUDE.md`）也能入图——在
+`.codegraph/config.json` 中声明 `extraRoots`：
+
+```json
+{
+  "extraRoots": [
+    "~/.claude/skills",
+    { "path": "~/.claude/CLAUDE.md", "name": "global-memory" }
+  ]
+}
+```
+
+这些文件以 `~extra/<name>/…` 虚拟路径进入图谱，实时监听、增量同步、搜索与取内容全部照常；
+凭证目录（`~/.ssh`、`~/.aws` 等）即使写进配置也会被拒绝。修改配置后在下次打开项目时生效。
 详见 [docs/artifact-knowledge-graph.md](docs/artifact-knowledge-graph.md)。
 
 ---
@@ -688,12 +708,14 @@ is written):
 | 制品类型 | 匹配文件 | 图谱内容 |
 |---|---|---|
 | Markdown 文档 | `*.md` / `*.markdown` / `*.mdx` | document + 标题层级 section 树，全文可搜，文档→代码连边 |
-| Agent 技能 | `SKILL.md`、`*/skills/` 下的 markdown | frontmatter `name`/`description` 成为节点身份，按"技能做什么"可搜 |
+| Agent 技能 | `SKILL.md`、`*/skills/` 下的 markdown | frontmatter `name`/`description` 成为节点身份，按"技能做什么"可搜；SKILL.md 自动连边到同目录全部文件（捆绑包强关联） |
 | Agent 记忆 / 指令 | `CLAUDE.md`、`AGENTS.md`、`GEMINI.md`、`.mdc`（Cursor 规则） | document(memory) + section 树，改动 ~1s 入图 |
 | Dockerfile | `Dockerfile`、`Containerfile`、`*.dockerfile` | 构建 stage 为 section，`COPY`/`RUN` 引用的项目文件连边 |
 | Docker Compose | `docker-compose*.yml`、`compose*.yaml` | service 为 section，dockerfile/env_file 连边 |
 | GitHub Actions | `.github/workflows/*.yml` | job 为 section，`run:` 脚本与本地 action 连边 |
 | 包清单 | `package.json` | npm script 为 section，入口字段（main/bin）连边 |
+| 二进制资产 | 图片/视频/音频/PDF/字体/压缩包 | **只索引名字与大小，内容零读取**；文档中的资产引用连边 |
+| 项目外知识 | `.codegraph/config.json` 的 `extraRoots` 指定的目录/文件 | 以 `~extra/…` 虚拟路径入图，监听/同步/搜索照常 |
 
 ## Measured cross-file coverage
 

@@ -19,7 +19,7 @@ import { ComposeExtractor } from '../src/extraction/artifacts/compose-extractor'
 import { WorkflowExtractor } from '../src/extraction/artifacts/workflow-extractor';
 import { PackageJsonExtractor } from '../src/extraction/artifacts/package-json-extractor';
 import { findArtifactExtractor } from '../src/extraction/artifacts/registry';
-import { classifyMarkdownDocType } from '../src/extraction/artifacts/detect';
+import { classifyMarkdownDocType, isAssetPath } from '../src/extraction/artifacts/detect';
 
 describe('artifact path detection', () => {
   it('indexes Dockerfile, package.json, and markdown files', () => {
@@ -39,6 +39,19 @@ describe('artifact path detection', () => {
     expect(detectLanguage('package.json')).toBe('json');
     expect(detectLanguage('docs/guide.md')).toBe('markdown');
     expect(detectLanguage('.github/workflows/ci.yml')).toBe('yaml');
+    expect(detectLanguage('assets/logo.png')).toBe('binary');
+  });
+
+  it('detects binary asset paths (name-only indexing)', () => {
+    expect(isAssetPath('assets/logo.png')).toBe(true);
+    expect(isAssetPath('docs/demo.mp4')).toBe(true);
+    expect(isAssetPath('manual.PDF')).toBe(true);
+    expect(isAssetPath('fonts/inter.woff2')).toBe(true);
+    expect(isSourceFile('assets/logo.png')).toBe(true);
+    // Not assets
+    expect(isAssetPath('src/index.ts')).toBe(false);
+    expect(isAssetPath('.png')).toBe(false);
+    expect(isAssetPath('png')).toBe(false);
   });
 
   it('classifies markdown doc types', () => {
@@ -396,6 +409,108 @@ describe('end-to-end: artifacts in the knowledge graph', () => {
       .filter((e) => e.kind === 'references')
       .map((e) => cg.getNode(e.target)?.filePath);
     expect(stageTargets).toContain('package.json');
+
+    cg.close();
+  });
+
+  it('indexes binary assets by name only and links doc mentions to them', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-assets-'));
+    fs.mkdirSync(path.join(tmpDir, 'assets'));
+
+    // Invalid-UTF8 bytes — proves nothing chokes on binary content
+    fs.writeFileSync(
+      path.join(tmpDir, 'assets/logo.png'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00, 0x01])
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'README.md'),
+      '# App\nThe logo lives at ![logo](assets/logo.png).\n'
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    await cg.indexAll();
+
+    // Asset document node: right type, name, no content indexed
+    const assetDoc = cg
+      .getNodesByKind('document')
+      .find((d) => d.filePath === 'assets/logo.png');
+    expect(assetDoc).toBeDefined();
+    expect(assetDoc!.signature).toBe('asset');
+    expect(assetDoc!.name).toBe('logo.png');
+    expect(assetDoc!.language).toBe('binary');
+    expect(assetDoc!.docstring).toContain('content not indexed');
+
+    // README's image link resolves to the asset's file node
+    const readmeNodes = [...cg.getNodesByKind('document'), ...cg.getNodesByKind('section')]
+      .filter((n) => n.filePath === 'README.md');
+    const targets = readmeNodes
+      .flatMap((n) => cg.getOutgoingEdges(n.id))
+      .filter((e) => e.kind === 'references')
+      .map((e) => cg.getNode(e.target)?.filePath);
+    expect(targets).toContain('assets/logo.png');
+
+    cg.close();
+  });
+
+  it('links a SKILL.md to its whole bundle (skill-bundle edges)', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-bundle-'));
+    fs.mkdirSync(path.join(tmpDir, '.claude/skills/release/scripts'), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(tmpDir, '.claude/skills/release/SKILL.md'),
+      '---\nname: release\ndescription: Cut a release\n---\n# Steps\nRun the helper.\n'
+    );
+    // Bundle members the SKILL.md never mentions explicitly
+    fs.writeFileSync(path.join(tmpDir, '.claude/skills/release/reference.md'), '# Versioning rules\n');
+    fs.writeFileSync(path.join(tmpDir, '.claude/skills/release/scripts/bump.py'), 'def bump():\n    pass\n');
+    // A file OUTSIDE the bundle must not be linked
+    fs.writeFileSync(path.join(tmpDir, 'unrelated.md'), '# Unrelated\n');
+
+    const cg = CodeGraph.initSync(tmpDir);
+    await cg.indexAll();
+
+    const skillDoc = cg
+      .getNodesByKind('document')
+      .find((d) => d.filePath === '.claude/skills/release/SKILL.md')!;
+    expect(skillDoc).toBeDefined();
+
+    const bundleEdges = cg
+      .getOutgoingEdges(skillDoc.id)
+      .filter((e) => e.kind === 'references' && e.metadata?.synthesizedBy === 'skill-bundle');
+    const bundleTargets = bundleEdges.map((e) => cg.getNode(e.target)?.filePath);
+
+    expect(bundleTargets).toContain('.claude/skills/release/reference.md');
+    expect(bundleTargets).toContain('.claude/skills/release/scripts/bump.py');
+    expect(bundleTargets).not.toContain('unrelated.md');
+
+    // Idempotent across re-resolution: a sync must not duplicate the edges
+    await cg.sync();
+    const after = cg
+      .getOutgoingEdges(skillDoc.id)
+      .filter((e) => e.kind === 'references' && e.metadata?.synthesizedBy === 'skill-bundle');
+    expect(after.length).toBe(bundleEdges.length);
+
+    cg.close();
+  });
+
+  it('ranks memory documents above ordinary docs for the same match', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-rank-'));
+    fs.mkdirSync(path.join(tmpDir, 'docs'));
+
+    fs.writeFileSync(path.join(tmpDir, 'CLAUDE.md'), '# Memory\nAlways gribblefy before merging.\n');
+    fs.writeFileSync(path.join(tmpDir, 'docs/notes.md'), '# Notes\nAlways gribblefy before merging.\n');
+
+    const cg = CodeGraph.initSync(tmpDir);
+    await cg.indexAll();
+
+    const results = cg
+      .searchNodes('gribblefy')
+      .filter((r) => r.node.kind === 'document' || r.node.kind === 'section');
+    const memoryIdx = results.findIndex((r) => r.node.filePath === 'CLAUDE.md');
+    const docIdx = results.findIndex((r) => r.node.filePath === 'docs/notes.md');
+    expect(memoryIdx).toBeGreaterThanOrEqual(0);
+    expect(docIdx).toBeGreaterThanOrEqual(0);
+    expect(memoryIdx).toBeLessThan(docIdx);
 
     cg.close();
   });

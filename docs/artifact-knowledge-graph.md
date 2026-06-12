@@ -26,6 +26,7 @@ README、`CLAUDE.md`、skills、Dockerfile、CI workflow 等文件完全不在�
 | Docker Compose | `docker-compose*.yml`、`compose*.yaml` | `compose` | 每个 service |
 | GitHub Actions | `.github/workflows/*.yml` | `workflow` | 每个 job |
 | 包清单 | `package.json` | `package-manifest` | 每条 npm script |
+| 二进制资产 | 图片/视频/音频/PDF/字体/压缩包（png、jpg、svg、mp4、mp3、pdf、woff2、zip…） | `asset` | 无（**只索引名字，绝不读内容**） |
 
 ---
 
@@ -81,10 +82,63 @@ file:<path> ──contains──> document(signature=docType) ──contains─�
    `路径+kind+名字+行号` 的确定性哈希）；
 4. 该文件的引用重新走严格解析。
 
-记忆 / 技能文件修改后约 1 秒，图谱即为最新状态。`EXTRACTION_VERSION` 已从 14 升至 15，
+记忆 / 技能文件修改后约 1 秒，图谱即为最新状态。`EXTRACTION_VERSION` 已从 14 升至 16，
 存量索引会在 `codegraph status` 中提示重建。
 
-## 5. Agent 如何使用
+## 5. 项目外的知识：extra roots（额外索引根）
+
+Agent 的技能和持久记忆经常放在项目目录之外（如 `~/.claude/skills/`、用户级
+`CLAUDE.md`）。在 `.codegraph/config.json` 中声明后即可纳入图谱：
+
+```json
+{
+  "extraRoots": [
+    "~/.claude/skills",
+    { "path": "~/.claude/CLAUDE.md", "name": "global-memory" }
+  ]
+}
+```
+
+- 条目可以是**目录或单个文件**，支持 `~` 展开；`name` 可选（默认取 basename，重名自动加后缀）；
+- 这些文件以**虚拟路径前缀** `~extra/<name>/…` 进入图谱（如
+  `~extra/skills/deploy/SKILL.md`），不会与项目路径冲突，且在所有工具输出中可见"来自项目外"；
+- **实时更新同样生效**：watcher 会对每个 extra root 安装独立监听（目录用递归/逐目录策略，
+  单文件监听其父目录以兼容编辑器的原子替换写入），事件映射回虚拟路径后走同一条
+  去抖 → sync 管线；`codegraph sync` 的 (size, mtime)+哈希对账也覆盖它们；
+- **安全收口**：虚拟路径的解析集中在 `validatePathWithinRoot` 一处，只有项目自己的
+  config 显式注册过的根才可解析，且施加与项目根相同的词法 + realpath 包含性检查
+  （`../` 逃逸、符号链接逃逸一律拒绝）；凭证目录（`~/.ssh`、`~/.aws`、`~/.gnupg` 等）、
+  文件系统根、整个 home 目录即使写进 config 也会被拒绝；位于项目内部或包含项目的
+  路径同样跳过（前者已被正常扫描覆盖，后者会失控）；每个 root 上限 2000 个文件。
+- 修改 config 后在下次打开项目（或 daemon 重启）时生效；改动这些文件约 1 秒后图谱即更新。
+
+## 6. Skill 捆绑包：同目录文件强关联
+
+一个 skill 目录是自包含的捆绑包（SKILL.md + 脚本 + 参考文档）。仅靠"SKILL.md 里显式提到
+谁就连谁"会漏掉没被点名的成员，因此解析阶段新增 **skill-bundle 合成**：每个 `SKILL.md`
+的 document 节点向其目录子树内**每个已索引文件**发一条 `references` 边
+（`metadata.synthesizedBy: 'skill-bundle'`）。
+
+- 同目录成员关系是**确定性事实**，不是启发式猜测，因此不打 `provenance: 'heuristic'`；
+- 只从 SKILL.md 这个规范锚点出发（星形拓扑），不做成员两两互连（边数爆炸）；
+- 幂等（重复 sync 不会重复发边），每个捆绑包上限 100 个文件；
+- 效果：问"发版的 skill 怎么用"，一次 explore 连 SKILL.md 没点名的辅助脚本和参考文档
+  一起带出来。
+
+## 7. 记忆文件权重更高 + 二进制资产只记名字
+
+**搜索排序**：document/section 参与 `kindBonus` 排序后，再按语义类型加权
+（`docTypeBonus`，按路径分类，对 document 和它的 section 都生效）：
+`memory +6 > skill +4 > readme +2 > 普通 doc 0`。记忆文件是常驻指令，与查询匹配时
+应排在普通文档之前——加权后一条匹配的 memory 与一个匹配的函数同级。
+
+**二进制资产**：图片/视频/音频/PDF/字体/压缩包以 `file → document(signature='asset')`
+进入图谱，**内容零读取**——索引器用 `size:mtime` 占位串代替文件内容参与哈希/变更检测，
+超大文件也不受体积上限影响。收益：按文件名可搜到资产；README 里的
+`![logo](assets/logo.png)` 能解析成真实的 doc→asset 边；改 `assets/` 下的文件能反查
+哪些文档引用了它。
+
+## 8. Agent 如何使用
 
 遵循上游验证过的原则——**适配 agent 现有行为，不发明新工具**（实测新 MCP 工具很少被
 agent 选中）：
@@ -110,7 +164,7 @@ codegraph query "release" --kind document     # 按语义类型检索文档
 codegraph query "deploy" --kind section       # 检索文档小节
 ```
 
-## 6. 如何扩展新的制品类型
+## 9. 如何扩展新的制品类型
 
 注册表模式（仿 `src/installer/targets/`）：**一个新提取器文件 + 注册表一行**。
 
@@ -122,26 +176,40 @@ codegraph query "deploy" --kind section       # 检索文档小节
 3. 在 `registry.ts` 的 `ARTIFACT_EXTRACTORS` 加一项；
 4. 在 `__tests__/artifacts.test.ts` 补测试；提升 `EXTRACTION_VERSION`。
 
-## 7. 验证数据
+## 10. 验证数据
 
-- **测试**：`__tests__/artifacts.test.ts` 13 个用例（路径判定、各提取器单元测试、端到端
-  连边精度——含"跨文件同名符号不连边"的负向断言）；全量套件 1351 通过。
-- **Dogfood**（对本仓库自身建索引）：266 文件 → 4216 节点 / 16876 边，其中 42 个
-  document + 436 个 section（约 11%，无节点爆炸）；511 条 doc-mention 边抽样全部命中
-  正确定义。
+- **测试**：`__tests__/artifacts.test.ts` 17 个用例（路径判定、各提取器单元测试、端到端
+  连边精度——含"跨文件同名符号不连边"的负向断言，asset/skill-bundle/记忆排序）+
+  `__tests__/extra-roots.test.ts` 7 个用例（config 解析、虚拟路径安全收口的逃逸拒绝、
+  端到端索引/同步/删除、watcher 虚拟路径过滤）；全量套件 1361 通过。
+- **Dogfood**（对本仓库自身建索引，外挂一个含 SKILL.md+notes.md 的 extra root）：
+  4297 节点 / 17205 边，47 个 document（33 doc、4 skill、2 memory、2 readme、
+  2 workflow、2 package-manifest、2 asset），无节点爆炸；extra root 文件以
+  `~extra/skills/…` 路径入图且 docType 正确；skill-bundle 边把 SKILL.md 与未被点名的
+  同目录 notes.md 关联；`codegraph query "sample external skill" --kind document`
+  第一名即外部技能。
 
-## 8. 涉及文件
+## 11. 涉及文件
 
 ```
-新增  src/extraction/artifacts/        制品提取器框架（detect / common / registry + 5 个提取器）
-新增  __tests__/artifacts.test.ts      13 个测试
-修改  src/types.ts                     NodeKind += document, section；Language += markdown, dockerfile, json
+新增  src/extraction/artifacts/        制品提取器框架（detect / common / registry + 6 个提取器，含 asset）
+新增  src/extra-roots.ts               extra roots：config 解析、注册表、虚拟路径解析、扫描
+新增  src/resolution/skill-bundle.ts   skill-bundle 边合成
+新增  __tests__/artifacts.test.ts      17 个测试（含 asset / bundle / 排序）
+新增  __tests__/extra-roots.test.ts    7 个测试（config / 安全 / e2e / watcher）
+修改  src/types.ts                     NodeKind += document, section；Language += markdown, dockerfile, json, binary
 修改  src/extraction/grammars.ts       扩展名映射、语言检测、isSourceFile
 修改  src/extraction/tree-sitter.ts    extractFromSource 制品分发
-修改  src/resolution/index.ts          resolveDocMention 严格连边分支
+修改  src/extraction/index.ts          扫描追加 extra roots；asset 零读取；路径解析统一过安全校验
+修改  src/sync/watcher.ts              extra roots 监听 + 虚拟路径事件映射
+修改  src/utils.ts                     validatePathWithinRoot 识别虚拟路径
+修改  src/index.ts                     构造时加载注册 extraRoots；watch 传入
+修改  src/resolution/index.ts          resolveDocMention 严格连边分支；skill-bundle 合成调用
 修改  src/resolution/types.ts          resolvedBy += 'doc-mention'
+修改  src/search/query-utils.ts        kindBonus += document/section；docTypeBonus
+修改  src/db/queries.ts                搜索重排序应用 docTypeBonus
 修改  src/mcp/tools.ts                 search kind 枚举
 修改  src/mcp/server-instructions.ts   agent 指导
 修改  src/context/index.ts             高价值 kind 列表
-修改  src/extraction/extraction-version.ts  14 → 15
+修改  src/extraction/extraction-version.ts  14 → 16
 ```
