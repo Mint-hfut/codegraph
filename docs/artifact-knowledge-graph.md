@@ -21,6 +21,7 @@ README、`CLAUDE.md`、skills、Dockerfile、CI workflow 等文件完全不在�
 |---|---|---|---|
 | Markdown 文档 | `*.md` / `*.markdown` / `*.mdx` | `readme` / `doc` | 标题层级（`#`–`######`）树 |
 | Agent 技能 | `SKILL.md`、`*/skills/` 下的 markdown | `skill` | 标题层级树 |
+| Slash 命令 | dot 工具目录下的 `commands/*.md`（`.claude/commands/`、`.cursor/commands/`，含 `~extra` 下的）；`src/commands/` 这类普通目录**不**误判 | `command` | 标题层级树 |
 | Agent 记忆 / 指令 | `CLAUDE.md`、`AGENTS.md`、`GEMINI.md`、`copilot-instructions.md`、`.mdc`（Cursor 规则）、`.claude/memory/` | `memory` | 标题层级树 |
 | Dockerfile | `Dockerfile`、`Containerfile`、`Dockerfile.*`、`*.dockerfile` | `dockerfile` | 每个构建 stage（`FROM … AS …`） |
 | Docker Compose | `docker-compose*.yml`、`compose*.yaml` | `compose` | 每个 service |
@@ -46,6 +47,13 @@ file:<path> ──contains──> document(signature=docType) ──contains─�
   "按行号读文件" 机制返回逐字原文。**存储层一行未改**；
 - `SKILL.md` 的 YAML frontmatter（`name:` / `description:`）成为 document 节点的名字和
   摘要，所以按"技能做什么"就能搜到技能，而不只是按文件名。
+- **skill / command 专有结构折叠进可搜索文本**（不改 schema——节点没有 metadata 列，
+  能进 FTS 的只有 `name`/`qualifiedName`/`docstring`/`signature` 四列，所以一律落到
+  `docstring`）：`description` 里的"Use when…"**触发条件**被单独拆出并打上 `Trigger:`
+  标签;frontmatter 的 `allowed-tools` / `argument-hint` / `model`（标量、`[a, b]` 流式
+  列表、`- item` 块式列表都解析）分别折叠成 `Tools:` / `Arguments:` / `Model:` 标签。
+  于是"哪个 skill 负责发版""哪个 command 收 base-branch 参数"这类查询能命中。
+  `signature` 仍严格等于 docType(skill-bundle 与 tools.ts 显示都依赖它,不被污染)。
 
 ## 3. 高置信 doc→code 连边（宁缺毋滥）
 
@@ -82,7 +90,7 @@ file:<path> ──contains──> document(signature=docType) ──contains─�
    `路径+kind+名字+行号` 的确定性哈希）；
 4. 该文件的引用重新走严格解析。
 
-记忆 / 技能文件修改后约 1 秒，图谱即为最新状态。`EXTRACTION_VERSION` 已从 14 升至 16，
+记忆 / 技能文件修改后约 1 秒，图谱即为最新状态。`EXTRACTION_VERSION` 已从 14 升至 17，
 存量索引会在 `codegraph status` 中提示重建。
 
 ## 5. 项目外的知识：extra roots（额外索引根）
@@ -129,8 +137,8 @@ Agent 的技能和持久记忆经常放在项目目录之外（如 `~/.claude/sk
 
 **搜索排序**：document/section 参与 `kindBonus` 排序后，再按语义类型加权
 （`docTypeBonus`，按路径分类，对 document 和它的 section 都生效）：
-`memory +6 > skill +4 > readme +2 > 普通 doc 0`。记忆文件是常驻指令，与查询匹配时
-应排在普通文档之前——加权后一条匹配的 memory 与一个匹配的函数同级。
+`memory +6 > skill +4 = command +4 > readme +2 > 普通 doc 0`。记忆文件是常驻指令，
+与查询匹配时应排在普通文档之前——加权后一条匹配的 memory 与一个匹配的函数同级。
 
 **二进制资产**：图片/视频/音频/PDF/字体/压缩包以 `file → document(signature='asset')`
 进入图谱，**内容零读取**——索引器用 `size:mtime` 占位串代替文件内容参与哈希/变更检测，
@@ -178,10 +186,11 @@ codegraph query "deploy" --kind section       # 检索文档小节
 
 ## 10. 验证数据
 
-- **测试**：`__tests__/artifacts.test.ts` 17 个用例（路径判定、各提取器单元测试、端到端
+- **测试**：`__tests__/artifacts.test.ts` 20 个用例（路径判定含 command/普通 commands 目录
+  负向断言、各提取器单元测试含 skill 触发条件拆分 + allowed-tools/argument-hint 折叠、端到端
   连边精度——含"跨文件同名符号不连边"的负向断言，asset/skill-bundle/记忆排序）+
   `__tests__/extra-roots.test.ts` 7 个用例（config 解析、虚拟路径安全收口的逃逸拒绝、
-  端到端索引/同步/删除、watcher 虚拟路径过滤）；全量套件 1361 通过。
+  端到端索引/同步/删除、watcher 虚拟路径过滤）；全量套件除既有环境性失败外全部通过。
 - **Dogfood**（对本仓库自身建索引，外挂一个含 SKILL.md+notes.md 的 extra root）：
   4297 节点 / 17205 边，47 个 document（33 doc、4 skill、2 memory、2 readme、
   2 workflow、2 package-manifest、2 asset），无节点爆炸；extra root 文件以
@@ -195,7 +204,7 @@ codegraph query "deploy" --kind section       # 检索文档小节
 新增  src/extraction/artifacts/        制品提取器框架（detect / common / registry + 6 个提取器，含 asset）
 新增  src/extra-roots.ts               extra roots：config 解析、注册表、虚拟路径解析、扫描
 新增  src/resolution/skill-bundle.ts   skill-bundle 边合成
-新增  __tests__/artifacts.test.ts      17 个测试（含 asset / bundle / 排序）
+新增  __tests__/artifacts.test.ts      20 个测试（含 asset / bundle / 排序 / skill·command frontmatter 折叠）
 新增  __tests__/extra-roots.test.ts    7 个测试（config / 安全 / e2e / watcher）
 修改  src/types.ts                     NodeKind += document, section；Language += markdown, dockerfile, json, binary
 修改  src/extraction/grammars.ts       扩展名映射、语言检测、isSourceFile
@@ -211,5 +220,7 @@ codegraph query "deploy" --kind section       # 检索文档小节
 修改  src/mcp/tools.ts                 search kind 枚举
 修改  src/mcp/server-instructions.ts   agent 指导
 修改  src/context/index.ts             高价值 kind 列表
-修改  src/extraction/extraction-version.ts  14 → 16
+修改  src/extraction/artifacts/detect.ts     DocType += command；skill/command 路径分类
+修改  src/extraction/artifacts/markdown-extractor.ts  frontmatter 全量解析 + skill/command 触发条件拆分/工具/参数/模型折叠
+修改  src/extraction/extraction-version.ts  14 → 17
 ```

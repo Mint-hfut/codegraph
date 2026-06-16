@@ -12,6 +12,7 @@
 export type DocType =
   | 'readme'
   | 'skill'
+  | 'command'
   | 'memory'
   | 'doc'
   | 'dockerfile'
@@ -102,6 +103,13 @@ export function classifyMarkdownDocType(filePath: string): DocType {
   // virtual prefix (extra index roots) alongside dotted dirs (`.claude`).
   if (/^SKILL\.md$/i.test(base) || /(^|\/)[~.]?[\w-]+\/skills\//.test(filePath)) {
     return 'skill';
+  }
+  // Slash commands: markdown under a tool's `commands/` directory. Anchored to
+  // a dot-prefixed parent (`.claude/commands/`, `.cursor/commands/`, and—via an
+  // extra root—`~extra/<root>/.claude/commands/`) so a generic `src/commands/`
+  // doc dir isn't mistaken for an agent command.
+  if (/(^|\/)\.[\w-]+\/commands\/[^/]+\.(md|markdown|mdx)$/i.test(filePath)) {
+    return 'command';
   }
   // Long-term agent memory / instruction files.
   if (

@@ -48,15 +48,16 @@
 | | 上游 CodeGraph | 本分支 |
 |---|---|---|
 | **图谱覆盖范围** | 仅代码（tree-sitter 解析的源码符号） | 代码 **+ 项目知识制品**：markdown 文档、Agent 技能/记忆、Dockerfile/Containerfile、docker-compose、GitHub Actions workflow、package.json，以及**只记名字的二进制资产**（图片/视频/PDF 等，内容零读取） |
-| **节点类型** | 22 种代码 NodeKind | 新增 `document`（语义类型：readme / skill / memory / doc / dockerfile / compose / workflow / package-manifest / asset）与 `section`（标题层级 / 构建 stage / service / CI job / npm script） |
+| **节点类型** | 22 种代码 NodeKind | 新增 `document`（语义类型：readme / skill / command / memory / doc / dockerfile / compose / workflow / package-manifest / asset）与 `section`（标题层级 / 构建 stage / service / CI job / npm script） |
 | **文档 ↔ 代码连边** | 无 | 高置信 `references` 边：文档中的显式文件路径、全图唯一的符号名才连边，**歧义一律不连**（错边比没边更糟），边带 `resolvedBy: 'doc-mention'` 可审计 |
 | **项目外知识（skills/记忆）** | 无 | `.codegraph/config.json` 的 `extraRoots` 可挂载 `~/.claude/skills`、用户级 `CLAUDE.md` 等项目外目录/文件，以 `~extra/…` 虚拟路径入图，实时监听与同步同样生效 |
 | **Skill 强关联** | 无 | `SKILL.md` 自动连边到同目录全部文件（脚本、参考文档）——问一个 skill，整个捆绑包一起出 |
-| **搜索排序** | 统一按符号种类加权 | 知识文件按语义类型再加权：**memory > skill > readme > 普通 doc**，常驻指令优先浮出 |
+| **Skill/命令结构化** | 无 | skill 与 slash 命令（`.claude/commands/*.md`）的 frontmatter 入图：触发条件（"Use when…"）、`allowed-tools`、`argument-hint`、`model` 折叠进可搜索文本——"哪个 skill 负责发版""哪个命令收 base-branch 参数"可直接命中 |
+| **搜索排序** | 统一按符号种类加权 | 知识文件按语义类型再加权：**memory > skill = command > readme > 普通 doc**，常驻指令优先浮出 |
 | **Agent 能回答的问题** | "X 是怎么工作的"等代码结构/流程问题 | 额外支持 "README 里关于部署是怎么说的" "哪个 skill 负责发版" "CLAUDE.md 对测试有什么要求" "改这个函数会影响哪些文档/CI" |
 | **实时更新** | 代码文件改动 ~1s 入图 | 同一管线覆盖制品文件——改完 `CLAUDE.md`/`SKILL.md` 约 1 秒后图谱即最新 |
 | **安装方式** | npm / 一键安装脚本（预编译 bundle） | 从源码构建（见下文），其余 `codegraph install` / `init` 用法与上游一致 |
-| **索引版本** | EXTRACTION_VERSION 14 | 16（存量索引会提示重建，`codegraph index -f` 即可） |
+| **索引版本** | EXTRACTION_VERSION 14 | 17（存量索引会提示重建，`codegraph index -f` 即可） |
 
 架构、原理与扩展方法详见 [docs/artifact-knowledge-graph.md](docs/artifact-knowledge-graph.md)。
 
@@ -559,7 +560,9 @@ agent 用同样的 `codegraph_explore` / `codegraph_search` 即可命中。直�
 
 `codegraph_search` 的 `kind` 参数支持 `document` / `section` 过滤。文档中显式提到的文件
 路径和**全图唯一**的符号名会连边到对应代码节点；歧义提及一律不连（错边比没边更糟）。
-记忆文件在搜索排序中权重高于普通文档（memory > skill > readme > doc）；图片/视频/PDF
+记忆文件在搜索排序中权重高于普通文档（memory > skill = command > readme > doc）；skill
+与 slash 命令的 frontmatter（触发条件、`allowed-tools`、`argument-hint`、`model`）折叠进
+可搜索文本，所以"哪个 skill 负责发版""哪个命令收某参数"可直接命中；图片/视频/PDF
 等二进制资产**只索引名字**（内容零读取），README 里的图片链接会连到对应资产节点。
 
 **项目外的技能与记忆**（如 `~/.claude/skills`、用户级 `CLAUDE.md`）也能入图——在
@@ -708,7 +711,8 @@ is written):
 | 制品类型 | 匹配文件 | 图谱内容 |
 |---|---|---|
 | Markdown 文档 | `*.md` / `*.markdown` / `*.mdx` | document + 标题层级 section 树，全文可搜，文档→代码连边 |
-| Agent 技能 | `SKILL.md`、`*/skills/` 下的 markdown | frontmatter `name`/`description` 成为节点身份，按"技能做什么"可搜；SKILL.md 自动连边到同目录全部文件（捆绑包强关联） |
+| Agent 技能 | `SKILL.md`、`*/skills/` 下的 markdown | frontmatter `name`/`description` 成为节点身份，触发条件（"Use when…"）、`allowed-tools`、`model` 折叠进可搜索文本；SKILL.md 自动连边到同目录全部文件（捆绑包强关联） |
+| Slash 命令 | dot 工具目录下的 `commands/*.md`（`.claude/commands/` 等） | document(command) + section 树，`argument-hint`/`allowed-tools`/`model` 折叠进可搜索文本 |
 | Agent 记忆 / 指令 | `CLAUDE.md`、`AGENTS.md`、`GEMINI.md`、`.mdc`（Cursor 规则） | document(memory) + section 树，改动 ~1s 入图 |
 | Dockerfile | `Dockerfile`、`Containerfile`、`*.dockerfile` | 构建 stage 为 section，`COPY`/`RUN` 引用的项目文件连边 |
 | Docker Compose | `docker-compose*.yml`、`compose*.yaml` | service 为 section，dockerfile/env_file 连边 |

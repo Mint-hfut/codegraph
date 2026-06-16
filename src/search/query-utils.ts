@@ -429,6 +429,7 @@ export function docTypeBonus(node: Pick<Node, 'kind' | 'filePath'>): number {
   switch (classifyMarkdownDocType(node.filePath)) {
     case 'memory': return 6;
     case 'skill': return 4;
+    case 'command': return 4;
     case 'readme': return 2;
     default: return 0;
   }

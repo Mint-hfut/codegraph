@@ -62,6 +62,11 @@ describe('artifact path detection', () => {
     expect(classifyMarkdownDocType('.cursor/rules/style.mdc')).toBe('memory');
     expect(classifyMarkdownDocType('.claude/skills/deploy/SKILL.md')).toBe('skill');
     expect(classifyMarkdownDocType('docs/architecture.md')).toBe('doc');
+    // Slash commands under a tool's dot-dir — but NOT a generic commands/ dir.
+    expect(classifyMarkdownDocType('.claude/commands/deploy.md')).toBe('command');
+    expect(classifyMarkdownDocType('.cursor/commands/review.md')).toBe('command');
+    expect(classifyMarkdownDocType('~extra/dotfiles/.claude/commands/x.md')).toBe('command');
+    expect(classifyMarkdownDocType('src/commands/handler.md')).toBe('doc');
   });
 
   it('routes each artifact to its registry entry', () => {
@@ -133,6 +138,58 @@ describe('MarkdownExtractor', () => {
     expect(doc.signature).toBe('skill');
     expect(doc.name).toBe('deploy-app');
     expect(doc.docstring).toContain('Deploy the app to production');
+  });
+
+  it('folds a skill trigger condition + allowed-tools into the searchable docstring', () => {
+    const source = [
+      '---',
+      'name: releaser',
+      'description: Cut a release and publish to npm. Use when the user asks to ship a version or run a release.',
+      'allowed-tools:',
+      '  - Bash',
+      '  - Edit',
+      'model: opus',
+      '---',
+      '',
+      '# Steps',
+    ].join('\n');
+    const doc = new MarkdownExtractor('.claude/skills/release/SKILL.md', source)
+      .extract()
+      .nodes.find((n) => n.kind === 'document')!;
+    expect(doc.signature).toBe('skill');
+    // What-it-does kept; trigger split out and labeled; tools/model folded in.
+    expect(doc.docstring).toContain('Cut a release and publish to npm');
+    expect(doc.docstring).toContain('Trigger: Use when the user asks to ship');
+    expect(doc.docstring).toContain('Tools: Bash, Edit');
+    expect(doc.docstring).toContain('Model: opus');
+  });
+
+  it('extracts slash-command frontmatter (argument-hint, allowed-tools) for a command file', () => {
+    const source = [
+      '---',
+      'description: Open a pull request for the current branch.',
+      'argument-hint: [base-branch]',
+      'allowed-tools: [Bash, Read]',
+      '---',
+      '',
+      'Open a PR.',
+    ].join('\n');
+    const doc = new MarkdownExtractor('.claude/commands/open-pr.md', source)
+      .extract()
+      .nodes.find((n) => n.kind === 'document')!;
+    expect(doc.signature).toBe('command');
+    expect(doc.docstring).toContain('Open a pull request');
+    expect(doc.docstring).toContain('Arguments: base-branch');
+    expect(doc.docstring).toContain('Tools: Bash, Read');
+  });
+
+  it('leaves a plain doc description unchanged (no skill/command folding)', () => {
+    const source = ['---', 'description: Architecture overview.', '---', '', '# Intro'].join('\n');
+    const doc = new MarkdownExtractor('docs/architecture.md', source)
+      .extract()
+      .nodes.find((n) => n.kind === 'document')!;
+    expect(doc.signature).toBe('doc');
+    expect(doc.docstring).toBe('Architecture overview.');
   });
 
   it('emits high-confidence mentions and skips noise', () => {

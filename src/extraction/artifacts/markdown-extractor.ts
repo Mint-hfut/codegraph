@@ -11,12 +11,16 @@
  *       · inline-code spans that are file paths or identifier-shaped symbols
  *
  * YAML frontmatter `name:`/`description:` (the SKILL.md convention) feed the
- * document node's name/docstring so skills are searchable by what they do.
+ * document node's name/docstring so skills are searchable by what they do. For
+ * skills and slash commands the rest of the frontmatter — the trigger clause
+ * split out of the description, plus `allowed-tools`/`argument-hint`/`model` —
+ * is folded into the searchable docstring with explicit labels, so an agent
+ * file carries its structure, not just a markdown blurb.
  */
 
 import { Node, ExtractionResult, ExtractionError, Edge, UnresolvedReference } from '../../types';
 import { generateNodeId } from '../tree-sitter-helpers';
-import { classifyMarkdownDocType } from './detect';
+import { classifyMarkdownDocType, DocType } from './detect';
 import {
   createFileNode,
   createDocumentNode,
@@ -75,31 +79,16 @@ export class MarkdownExtractor {
     const docType = classifyMarkdownDocType(this.filePath);
 
     // --- frontmatter (--- ... ---) ---
-    let bodyStart = 0;
-    let fmName: string | undefined;
-    let fmDescription: string | undefined;
-    if (lines[0]?.trim() === '---') {
-      for (let i = 1; i < Math.min(lines.length, 100); i++) {
-        const line = lines[i]!;
-        if (line.trim() === '---') {
-          bodyStart = i + 1;
-          break;
-        }
-        const kv = line.match(/^(name|description)\s*:\s*(.+)$/);
-        if (kv) {
-          const value = kv[2]!.trim().replace(/^['"]|['"]$/g, '');
-          if (kv[1] === 'name') fmName = value;
-          else fmDescription = value;
-        }
-      }
-    }
+    const { bodyStart, fields: fm } = parseFrontmatter(lines);
+    const fmName = fm['name'];
+    const fmDocstring = composeDocstring(docType, fm);
 
     const fileNode = createFileNode(this.filePath, this.source, 'markdown');
     this.nodes.push(fileNode);
 
     const docNode = createDocumentNode(this.filePath, this.source, 'markdown', docType, {
       name: fmName,
-      docstring: fmDescription,
+      docstring: fmDocstring,
     });
     this.nodes.push(docNode);
     this.edges.push(containsEdge(fileNode.id, docNode.id, 1));
@@ -202,4 +191,108 @@ function stripMarkdown(text: string): string {
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/[`*_>#]/g, '')
     .trim();
+}
+
+function stripYamlQuotes(value: string): string {
+  return value.trim().replace(/^['"]|['"]$/g, '');
+}
+
+/**
+ * Minimal YAML-frontmatter reader: pulls every top-level `key: value` pair out
+ * of a leading `--- … ---` block. Scalars, flow lists (`[a, b]`), and block
+ * lists (`key:` followed by `- item` lines) are all flattened to a
+ * comma-joined string. Not a full YAML parser — just enough for the agent
+ * knowledge-file conventions (name/description/allowed-tools/argument-hint/model).
+ */
+function parseFrontmatter(lines: string[]): {
+  bodyStart: number;
+  fields: Record<string, string>;
+} {
+  const fields: Record<string, string> = {};
+  if (lines[0]?.trim() !== '---') return { bodyStart: 0, fields };
+
+  let bodyStart = 0;
+  let listKey: string | null = null;
+  let listItems: string[] = [];
+  const flushList = (): void => {
+    if (listKey && listItems.length) fields[listKey] = listItems.join(', ');
+    listKey = null;
+    listItems = [];
+  };
+
+  for (let i = 1; i < Math.min(lines.length, 200); i++) {
+    const line = lines[i]!;
+    if (line.trim() === '---') {
+      bodyStart = i + 1;
+      break;
+    }
+    const item = line.match(/^\s*-\s+(.+)$/);
+    if (item && listKey) {
+      listItems.push(stripYamlQuotes(item[1]!));
+      continue;
+    }
+    const kv = line.match(/^([\w-]+)\s*:\s*(.*)$/);
+    if (!kv) continue;
+    flushList();
+    const key = kv[1]!.toLowerCase();
+    const raw = kv[2]!.trim();
+    if (raw === '') {
+      // Either an empty value or the header of a block list on following lines.
+      listKey = key;
+      continue;
+    }
+    if (raw.startsWith('[') && raw.endsWith(']')) {
+      fields[key] = raw
+        .slice(1, -1)
+        .split(',')
+        .map((s) => stripYamlQuotes(s))
+        .filter(Boolean)
+        .join(', ');
+    } else {
+      fields[key] = stripYamlQuotes(raw);
+    }
+  }
+  flushList();
+  return { bodyStart, fields };
+}
+
+/**
+ * Split a skill/command `description` into what-it-does vs. when-to-invoke. The
+ * Claude Code convention puts the trigger in a trailing "Use when …" clause
+ * ("… benchmark a codegraph version. Use when the user runs /agent-eval …").
+ */
+function splitTrigger(description: string): { summary: string; trigger?: string } {
+  const idx = description.search(/\bUse\s+(?:this\s+\w+\s+)?(?:when|for|to)\b/i);
+  if (idx < 0) return { summary: description };
+  const summary = description.slice(0, idx).replace(/[\s.]+$/, '').trim();
+  const trigger = description.slice(idx).trim();
+  return { summary, trigger };
+}
+
+/**
+ * Build the document node's docstring (FTS-indexed). For agent skills and slash
+ * commands the structured frontmatter — trigger condition, allowed tools,
+ * argument hint, model — is folded into the searchable text with explicit
+ * labels, so these files carry more than a plain markdown blurb. For every
+ * other doc type the raw `description` (if any) is used as-is.
+ */
+function composeDocstring(docType: DocType, fm: Record<string, string>): string | undefined {
+  const description = fm['description'];
+  if (docType !== 'skill' && docType !== 'command') return description;
+
+  const tools = fm['allowed-tools'] ?? fm['tools'];
+  const args = fm['argument-hint'] ?? fm['argument_hint'];
+  const model = fm['model'];
+
+  const parts: string[] = [];
+  if (description) {
+    const { summary, trigger } = splitTrigger(description);
+    if (summary) parts.push(summary);
+    if (trigger) parts.push(`Trigger: ${trigger}`);
+  }
+  if (tools) parts.push(`Tools: ${tools}`);
+  if (args) parts.push(`Arguments: ${args}`);
+  if (model) parts.push(`Model: ${model}`);
+
+  return parts.length ? parts.join('\n') : undefined;
 }
