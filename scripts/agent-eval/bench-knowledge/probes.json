@@ -1,0 +1,76 @@
+{
+  "_comment": "Deterministic retrieval probes — NO LLM. Each probe is a benchmark task phrased as 'when an agent searches/queries for X, does codegraph surface the right knowledge?'. 'search' probes run cg.searchNodes (the exact path codegraph_search wraps) and assert the expected node appears (within `limit`, or at rank #1 when `expectTop`). 'edge' probes read the SQLite graph directly and assert the synthesized/resolved edges exist. The improved build should pass all; the original build (no doc indexing) fails the knowledge probes — that gap IS the result.",
+  "probes": [
+    {
+      "id": "skill-by-capability",
+      "desc": "Searching a skill's capability surfaces its SKILL.md (frontmatter description is searchable).",
+      "type": "search",
+      "query": "deploy roll back safely",
+      "kinds": ["document"],
+      "limit": 5,
+      "expect": { "filePathEndsWith": ".claude/skills/deployer/SKILL.md", "signature": "skill" }
+    },
+    {
+      "id": "skill-by-trigger",
+      "desc": "The 'Use when…' trigger words route to the skill (trigger is folded into the searchable docstring).",
+      "type": "search",
+      "query": "blast radius rollout impact",
+      "kinds": ["document"],
+      "limit": 5,
+      "expect": { "filePathEndsWith": "deployer/SKILL.md" }
+    },
+    {
+      "id": "command-frontmatter",
+      "desc": "A slash command is found and its argument-hint is folded into the searchable docstring.",
+      "type": "search",
+      "query": "changelog release version entry",
+      "kinds": ["document"],
+      "limit": 5,
+      "expect": { "filePathEndsWith": ".claude/commands/changelog.md", "signature": "command", "docstringIncludes": "Arguments: version" }
+    },
+    {
+      "id": "memory-outranks-doc",
+      "desc": "On a term shared by an agent-memory file and an ordinary doc, the memory file ranks first.",
+      "type": "search",
+      "query": "gribblefy",
+      "kinds": ["document", "section"],
+      "limit": 10,
+      "expect": { "filePathEndsWith": "CLAUDE.md" },
+      "expectTop": true
+    },
+    {
+      "id": "asset-by-name",
+      "desc": "A binary asset is findable by name, and its document records that content is NOT indexed.",
+      "type": "search",
+      "query": "diagram",
+      "kinds": ["document"],
+      "limit": 5,
+      "expect": { "filePathEndsWith": "assets/diagram.png", "signature": "asset", "docstringIncludes": "not indexed" }
+    },
+    {
+      "id": "skill-bundle-edges",
+      "desc": "SKILL.md is linked to its indexed bundle siblings (reference doc + helper script).",
+      "type": "edge",
+      "fromPathEndsWith": "deployer/SKILL.md",
+      "fromSignature": "skill",
+      "edgeKind": "references",
+      "targetPathsEndWith": ["deployer/reference.md", "scripts/deploy.py"]
+    },
+    {
+      "id": "doc-to-asset-edge",
+      "desc": "A README image link resolves to the asset's file node (doc → asset).",
+      "type": "edge",
+      "fromPathEndsWith": "README.md",
+      "edgeKind": "references",
+      "targetPathsEndWith": ["assets/diagram.png"]
+    },
+    {
+      "id": "doc-to-code-edge",
+      "desc": "A doc that names a source file/symbol links to the code (doc → code).",
+      "type": "edge",
+      "fromPathEndsWith": "README.md",
+      "edgeKind": "references",
+      "targetPathsEndWith": ["src/app.ts"]
+    }
+  ]
+}

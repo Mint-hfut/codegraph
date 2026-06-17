@@ -12,12 +12,58 @@ It compares two arms, **both with codegraph attached over MCP**:
 | `improved` | current working tree | the knowledge graph (docs/skills/memory/commands/assets indexed) |
 | `original` | baseline git ref (default `16c73e2`) | codegraph *before* the knowledge-graph work — markdown/skills not indexed |
 
-Same questions, same corpus, same model. The only difference is the codegraph
-build, so any gap is attributable to the feature. The corpus defaults to **this
-repo** (it's full of skills, a big `CLAUDE.md`, and docs), which is exactly the
-material the feature indexes.
+There are **two tiers**, run them in order:
 
-## Run
+| Tier | Script | Cost | Measures |
+|---|---|---|---|
+| 1 — deterministic probes | `run-probe.sh` | **none (no LLM)** | does codegraph *surface the right knowledge* (retrieval correctness)? |
+| 2 — full agent A/B | `run-bench.sh` | real agent runs (opus) | task **success rate** + **token consumption** end to end |
+
+Tier 1 is the cheap, reproducible proof that the feature changed what's
+retrievable; Tier 2 is the expensive proof that it changes agent outcomes. Tier 1
+should pass before Tier 2 is worth spending money on (CLAUDE.md's validation
+methodology: "deterministic probes" first, then the agent A/B).
+
+## Tier 1 — deterministic probes (no LLM)
+
+```bash
+scripts/agent-eval/bench-knowledge/run-probe.sh            # ~12s, free
+SKIP_BASELINE=1 scripts/agent-eval/bench-knowledge/run-probe.sh   # improved only
+```
+
+It generates a tiny synthetic corpus (`make-fixture.mjs`) that contains one of
+everything — an agent skill with frontmatter + bundle siblings, a slash command
+with an `argument-hint`, an agent-memory file vs an ordinary doc sharing a rare
+term, a binary asset, and a README that links the asset and a code symbol — then
+indexes it with **both builds** and runs the probes in `probes.json` against each.
+
+Each probe is a benchmark task phrased as "when an agent searches for X, does
+codegraph surface the right knowledge?" — checked through the real `searchNodes`
+path (what `codegraph_search` wraps) or the graph edges directly. No model is
+involved, so the result is deterministic. Example output:
+
+```
+| Probe                | improved | original |
+|----------------------|:--------:|:--------:|
+| skill-by-capability  |    ✅    |    ❌    |   skill found by its description
+| skill-by-trigger     |    ✅    |    ❌    |   "Use when…" trigger is searchable
+| command-frontmatter  |    ✅    |    ❌    |   command + argument-hint folded in
+| memory-outranks-doc  |    ✅    |    ❌    |   memory ranks above a plain doc
+| asset-by-name        |    ✅    |    ❌    |   asset found by name, content not indexed
+| skill-bundle-edges   |    ✅    |    ❌    |   SKILL.md linked to its siblings
+| doc-to-asset-edge    |    ✅    |    ❌    |   README image link → asset node
+| doc-to-code-edge     |    ✅    |    ❌    |   README symbol mention → code node
+improved: 8/8 · original: 0/8
+```
+
+(The `original` build at `16c73e2` doesn't index these knowledge files at all, so
+none of the nodes/edges exist — the 8/0 split is the feature, isolated.)
+
+## Tier 2 — full agent A/B (success rate + tokens)
+
+Same two builds, both attached over MCP, but now a real agent answers the
+questions in `tasks.json` over a corpus (default: **this repo**, which is full of
+skills, a big `CLAUDE.md`, and docs).
 
 ```bash
 # default: this repo as corpus, baseline 16c73e2, 1 rep/cell, opus
@@ -54,6 +100,13 @@ Supporting context per run: Read+Grep count, codegraph call count, duration.
 
 | File | Role |
 |---|---|
+| **Tier 1 (no LLM)** | |
+| `probes.json` | the deterministic benchmark tasks + expected nodes/edges |
+| `make-fixture.mjs` | generates the synthetic corpus exercising every feature |
+| `run-probe.sh` | builds both arms, indexes the fixture, runs the probes, reports |
+| `probe-bench.mjs` | runs probes against one build (searchNodes + graph edges) |
+| `probe-report.mjs` | `probe-results.jsonl` → improved-vs-original table |
+| **Tier 2 (agent A/B)** | |
 | `tasks.json` | the questions + assertion keywords + reference answers |
 | `run-bench.sh` | orchestrator: builds both arms, indexes the corpus per arm, runs every task×rep, scores, reports |
 | `lib.mjs` | shared stream-json parsing (per-turn token sum, tool buckets, final-answer extraction) |
