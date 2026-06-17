@@ -1,0 +1,53 @@
+{
+  "_comment": "Knowledge-oriented tasks scored against THIS repo as the target corpus. These probe exactly what the artifact knowledge-graph indexes (skills, agent memory, docs, code constants) — the improved build should answer them from codegraph_search/explore over document/section nodes, while the baseline build (no doc indexing) must fall back to Read/Grep. 'mustInclude' = every string must appear in the answer (case-insensitive, AND). 'anyOf' = each group is an OR; every group must have at least one hit. 'reference' is shown to the LLM judge only when the assertion check fails.",
+  "tasks": [
+    {
+      "id": "skill-add-lang",
+      "prompt": "In this project, which skill should I use to add support for a new tree-sitter language end to end? Answer with the skill's exact name.",
+      "mustInclude": ["add-lang"],
+      "anyOf": [],
+      "reference": "The `add-lang` skill: wires the grammar + extractor, writes tests, and benchmarks extraction + retrieval on 3 popular real-world repos."
+    },
+    {
+      "id": "skill-benchmark",
+      "prompt": "Which skill in this project benchmarks CodeGraph retrieval quality by comparing agent behavior with vs without CodeGraph? Give the skill name.",
+      "mustInclude": ["agent-eval"],
+      "anyOf": [],
+      "reference": "The `agent-eval` skill benchmarks retrieval quality via with/without-codegraph A/B runs on a real repo."
+    },
+    {
+      "id": "memory-sot",
+      "prompt": "According to this project's own guidance for AI agents (its CLAUDE.md), which single file is the source of truth for agent-facing MCP tool guidance? Answer with the file name.",
+      "mustInclude": ["server-instructions"],
+      "anyOf": [],
+      "reference": "src/mcp/server-instructions.ts is the single source of truth for agent-facing tool guidance (issue #529); the installer no longer writes a duplicate instructions block."
+    },
+    {
+      "id": "asset-policy",
+      "prompt": "How does this project handle binary assets like images, video, and PDFs in its knowledge graph — does it read their contents? Answer in one or two sentences.",
+      "mustInclude": [],
+      "anyOf": [
+        ["asset", "image", "binary"],
+        ["name only", "by name", "filename", "not read", "never read", "without reading", "content not indexed", "not indexed"]
+      ],
+      "reference": "Binary assets (images/video/audio/PDF/fonts/archives) are indexed by NAME ONLY — their content is never read or decoded. A file+document(signature='asset') pair is emitted so docs that mention an asset can link to it."
+    },
+    {
+      "id": "extraction-version",
+      "prompt": "What is the current value of the EXTRACTION_VERSION constant in this codebase, and which file defines it?",
+      "mustInclude": ["17"],
+      "anyOf": [["extraction-version", "extraction_version", "extractionversion"]],
+      "reference": "EXTRACTION_VERSION is 17, defined in src/extraction/extraction-version.ts."
+    },
+    {
+      "id": "skill-bundle",
+      "prompt": "In this project's knowledge graph, what links a skill's SKILL.md to the other files in its directory (its helper scripts and reference docs), so asking about a skill surfaces the whole bundle?",
+      "mustInclude": [],
+      "anyOf": [
+        ["skill-bundle", "skill bundle", "bundle"],
+        ["references edge", "reference edge", "synthesiz", "links", "linked", "edges"]
+      ],
+      "reference": "A skill-bundle synthesis pass links each SKILL.md via 'references' edges to every indexed file under its directory (deterministic, metadata.synthesizedBy='skill-bundle', idempotent, capped at 100 files)."
+    }
+  ]
+}
